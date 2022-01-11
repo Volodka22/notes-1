@@ -685,3 +685,383 @@ typedef void (*deleter_t)(void* p);
 template <typename T>
 using deleter_t = (*)(T* p);
 ```
+
+    
+    
+    
+   
+# Lecture 7. Сигналы
+
+
+signal = listener = observer. Это рассказ НЕ ПРО UNIX сигналы.
+
+Зачем это нужно? Это подписка на событие -- вызов callback после произошедствия какого-то действия. Поскольку одного callback может быть недостаточно, то сигналом называют _контейнер function'ов_.
+
+По этому тоже была практика, которую лучше почитать, т.к. там описывались поинтереснее решения всяких проблем, тут нотесы с кодом тоже будут, но, возможно, не так подробно.
+
+Наивно это выглядит так:
+```
+struct signal {
+    using slot_t = function<void()>;
+    
+    void connect(slot_t slot) {
+        slots.push_back(move(slot));
+    }
+    
+    void operator()() const {  // это immit
+        for (slot_t const& slot : slots) {
+            slot();
+        }
+    }
+    
+private:
+    vector<slot_t> slots;  // callback называют слотом, соу это они  
+};
+```
+
+Хочется конечно и disconnect иметь. connect в свою очережь обычно возвращает какой-то connection, удобно его итебатором сделать, да и для дисконнекта мапа приятнее будет. So:
+```
+strcut connection {
+
+    // ctor 
+    
+    void disconnect() {
+        size_t c = sig->slots.erase(id);
+        assert(c == 1);
+    }
+    
+    signal* sig;
+    id_t id;
+};
+
+struct signal {
+    using id_t = uint64_t;
+    using slot_t = function<void()>;
+    
+    connection connect(slot_t slot) {
+        id_t id = next_id++;
+        slots.insert({id, move(slot)});
+        return connection(this, id);
+    }
+    
+    void operator()() const {
+        for (auto it = slots.begin(); it != slots.end(); ++it) {
+            it->second();
+        }
+    }
+    
+private:
+    unordered_map<id_t, slot_t> slots;
+    id_t next_id = 0;
+};
+```
+
+Это похоже на правду, но он часто не приминим, т.к. будет ломаться при некоторой последовательности вызовов наших функций. + если какой-то колбэк не ноуэксепт, то вроде получаем странное поведение, однако многи ебилиотеки кладут хуй на это, в том числе и буст, так что последуем их примеру и не будем писать трай-кэтч с логированием.
+
+Проблема тут в следующем, рассмотрим такой класс:
+```
+struct mytype {
+    mytype()
+        : c(global_timer.connect(
+            [this]{on_timer_elapsed()}
+            )) {}
+    
+    void on_timer_elapsed() {
+        c.desconnect();
+    }
+    
+    connection c;
+};
+```
+Логика такая: подписались, произошло событие, мы отписались. Не то что бы редкий случай.  Тогда проблема в оператор(), поскольку при дисконнекте инвалидируется интератор, рассмотрим коллстэк:
+```
+operator()
+|---on_timer_elapsed()
+    |---disconnect()  // тут и сломается при ++it
+```
+
+Решить можно созданием очереди на удаление: если мы находимся в опереторе() и делается дисконнект, то просто забьем пустым фанкшеном нужный слот, и потом прочистим мапу. Если просто вызван дисконнект, то честно можено удалить слот, поэтоу заведем еще и флаг, в иммите мы дисконнектимся или нет (иначе мапа будет анбунд расти, если коннекты и дисконнекты случаются, а иммит не вызывается) + так как теперь мы удаляем слоты в константном иммите, сделаем мапу мутабельной:
+
+```
+strcut connection {
+
+    // ctor 
+    
+    void disconnect() {
+        if (sig->inside_imit) {
+            auto it = sig->slots.find(id);
+            assert(it != sig->clots.end());
+            it->second = slot_t();  // отмечаем, что слот удален
+        } else {
+            size_t c = sig->slots.erase(id);
+            assert(c == 1);
+        }
+            
+    }
+    
+    signal* sig;
+    id_t id;
+};
+
+struct signal {
+    using id_t = uint64_t;
+    using slot_t = function<void()>;
+    
+    connection connect(slot_t slot) {
+        id_t id = next_id++;
+        slots.insert({id, move(slot)});
+        return connection(this, id);
+    }
+    
+    void operator()() const {
+        inside_imit = true;
+        for (auto it = slots.begin(); it != slots.end(); ++it) {
+            if (it->second) {
+                it->second();
+            }
+        }
+        inside_imit = false;
+        
+        for (auto it = slots.begin(); it != slots.end(); ) {
+            if (it->second) {
+                ++it;
+            } else {
+                it = slots.erase(it);
+            }
+        }
+    }
+    
+private:
+    mutable unordered_map<id_t, slot_t> slots;
+    id_t next_id = 0;
+    mutable bool inside_imit = false;
+};
+```
+Какие теперь тут проблемы?
+- смущает пара inside_imit = true/false, можно обернуть в РАИИ. Т.к. она не эксепшн-сэйв, фикс:
+
+```
+    void operator()() const {
+        inside_imit = true;
+        try {
+            for (auto it = slots.begin(); it != slots.end(); ++it) {
+                if (it->second) {
+                    it->second();
+                }
+            }
+        } catch(...) {
+            inside_imit = false;
+            throw;
+        }
+        
+        inside_imit = false;
+  
+        for (auto it = slots.begin(); it != slots.end(); ) {
+            if (it->second) {
+                ++it;
+            } else {
+                it = slots.erase(it);
+            }
+        }
+    }
+```
+
+- еще проблема: наш инвариант - будучи внутри иммита, мы можем иметь пустые слоты, по выходу из иммита их в мапе быть не должно. Тогда прочистку надо делать и внутри кэтча:
+```
+    void leave_immit() {
+        inside_immit = false;
+        for (auto it = slots.begin(); it != slots.end(); ) {
+            if (it->second) {
+                ++it;
+            } else {
+                it = slots.erase(it);
+            }
+        }
+    }
+    void operator()() const {
+        inside_imit = true;
+        try {
+            for (auto it = slots.begin(); it != slots.end(); ++it) {
+                if (it->second) {
+                    it->second();
+                }
+            }
+        } catch(...) {
+            leave_immit();
+            throw;
+        }
+        
+        leave_immit();
+    }
+```
+- Все равно хуйня: до сих пор выставляем пару тру-фолс у inside_immit, а представьте такой коллстэк:
+```
+operator()
+|---handler()
+    |---operator() // по выходу inside_immit == false;
+    |---disconnect() // получили инвалидный итератор
+```
+
+Варианты?
+1. ЗаПрЕтИтЬ (потому что нахуй такое поведение вообще поддерживать)
+2. пофиксим просто? (ведь может быть такое) подсчитывая глубину inside_immit (вообще такие реализации с флагами в тру/фолс много когда сосут при рекурсии, лучше так не делать)
+
+```
+strcut connection {
+
+    // ctor 
+    
+    void disconnect() {
+        if (sig->inside_imit != 0) {
+            auto it = sig->slots.find(id);
+            assert(it != sig->clots.end());
+            it->second = slot_t();  // отмечаем, что слот удален
+        } else {
+            size_t c = sig->slots.erase(id);
+            assert(c == 1);
+        }
+            
+    }
+    
+    signal* sig;
+    id_t id;
+};
+
+struct signal {
+    using id_t = uint64_t;
+    using slot_t = function<void()>;
+    
+    connection connect(slot_t slot) {
+        id_t id = next_id++;
+        slots.insert({id, move(slot)});
+        return connection(this, id);
+    }
+    
+    void leave_immit() {
+        --inside_immit;
+        for (auto it = slots.begin(); it != slots.end(); ) {
+            if (it->second) {
+                ++it;
+            } else {
+                it = slots.erase(it);
+            }
+        }
+    }
+    void operator()() const {
+        ++inside_immit;
+        try {
+            for (auto it = slots.begin(); it != slots.end(); ++it) {
+                if (it->second) {
+                    it->second();
+                }
+            }
+        } catch(...) {
+            leave_immit();
+            throw;
+        }
+        
+        leave_immit();
+    }
+    
+private:
+    mutable unordered_map<id_t, slot_t> slots;
+    id_t next_id = 0;
+    mutable size_t inside_imit = 0;
+};
+```
+
+Попрежнему есть проблемы, но в том коде, который еще не написан :|  Деструктор сигнала может быть вызван внутри иммита. Разъёб просто! И такое реально встречается: создается таймер, который при тике удаляется -- ровно этот случай. А у нас будет проблема в иммите тогда, поскольку мапа, по которой итерируемся, протухнет и всё. Чо делать? Флаг не поставить, он же при удалении сигнала и сам удалится. Идея -- сделать это без динамических аллокаций, типо можно было просто в шаред_птр обернуть мапу и жить. Сохраним указатель на локальную переменную, уничтожены мы или нет, тогда эта переменная не будет разрушена при разрушении класса: 
+
+```
+strcut connection {
+
+    // ctor 
+    
+    void disconnect() {
+        if (sig->inside_imit != 0) {
+            auto it = sig->slots.find(id);
+            assert(it != sig->clots.end());
+            it->second = slot_t();  // отмечаем, что слот удален
+        } else {
+            size_t c = sig->slots.erase(id);
+            assert(c == 1);
+        }
+            
+    }
+    
+    signal* sig;
+    id_t id;
+};
+
+struct signal {
+    using id_t = uint64_t;
+    using slot_t = function<void()>;
+    
+    connection connect(slot_t slot) {
+        id_t id = next_id++;
+        slots.insert({id, move(slot)});
+        return connection(this, id);
+    }
+    
+    ~signal() {
+        if (is_destroyed) {
+            *is_destroyed = true;
+        }
+    }
+    
+    void leave_immit() {
+        is_destroyed = old_destroyed; // понятно, что это нескомпилируется, но похуй, это же пример :)
+        // по хорошему надо бы написать РАИИ класс где можно похранить old_destroyed
+        --inside_immit;
+        for (auto it = slots.begin(); it != slots.end(); ) {
+            if (it->second) {
+                ++it;
+            } else {
+                it = slots.erase(it);
+            }
+        }
+    }
+    void operator()() const {
+        bool* old_destroyed = is_destroyed;  // чтобы не сломать рекурсию
+        bool flag = false;
+        is_destroyed = &flag;
+        ++inside_immit;
+        try {
+            for (auto it = slots.begin(); it != slots.end(); ++it) {
+                if (it->second) {
+                    it->second();
+                    if (flag) {
+                        old_destroyed = true; // тут передаем выше флаг, что мы разрушены
+                        return;
+                    }
+                }
+            }
+        } catch(...) {
+            leave_immit();
+            throw;
+        }
+        
+        leave_immit();
+    }
+    
+private:
+    mutable unordered_map<id_t, slot_t> slots;
+    id_t next_id = 0;
+    mutable size_t inside_imit = 0;
+    mutable bool* is_destroyed;
+};
+```
+Заметим, что теперь вроде все работает, но это можно и подупростить:
+- не нужен inside_immit -- мы можем определять это по флагу is_destroyed
+- не нужна мапа с айдишниками -- можно использовать лист для слотов, тогда айдишником будет итератор листа
+
+
+В итоге получаем, что простая на первый взгляд идея выглядит как полный пиздец. А вообще зачем это все?
+1. Не пытайтесь писать подобные классы самостоятельно, пользуйтесь библиотеками, чтобы не породить множество проблем, которые, как видим, не сложно породить. Однако, обязательно изучите, какие гарантии она предоставляет, потому что мы здесь описали весьма полно. Часто в реализациях не выполняется свойство, что после дисконнекста слот не будет вызван. Что запрещает отписываться в деструкторе. треш..
+2. Если конечно не хочется тащить библиотеку только из-за сигнала, можно ебануть самописанный сигнал, но ассертить все кэйсы, которые могут возникнуть, но бы не хотели их видеть. Благо сейчас мы знаем эти кейсы.
+3. Те проблемы при последовательности вызовов одних функций внутри других имеет название -- **reentrancing**. В 80-90ых это много обсуждалось, сейчас всем как-то похуй. Это потому что раньше часто пользовались глобальными переменными, а сейчас все такие люди "передохли" (с). Поэтому реэнтрабельность кода сейчас второстепенная проблема, которая часто и не возникает, однако, как видим, она бывает актуальна и без глобальных переменных.
+
+
+Мораль всей истории: защищая свой код от внешнего воздействия, подумайте о том, насколько защищен ваш код внутри себя. Если мы вызываем кого-то наружу, что он может вызывать обратно у нас? И обратно, если пишешь обработчик.
+
+Получилось какое-то филосовское завершение. Но даже локально при наследование такие проблемы могут возникать -- базовый класс вызывает производный, какие тогда функции может обратно вызывать производный, чтобы ничего не ебнулось в совокупности.
