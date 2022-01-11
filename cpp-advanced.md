@@ -1,3 +1,18 @@
+#Contents
+
+[Lecture 1. rvalue-ссылки](#lecture-1-rvalue-ссылки)
+[Lecture 2. rvalue-ссылки](#lecture-2-rvalue-ссылки)
+[Lecture 3. Intrusive контейнеры](#lecture-3-intrusive-контейнеры)
+[Lecture 4. shared_ptr](#lecture-4-shared_ptr)
+[Lecture 5. lambda](#lecture-5-lambda)
+[Lecture 6. std::function](#lecture-6-std::function)
+[Lecture 7. Сигналы](#lecture-7-сигналы)
+
+
+
+
+
+
 # Lecture 1. rvalue-ссылки
 
 +: позволяет уменьшать число копирований
@@ -392,7 +407,7 @@ struct mytype : std::enable_shared_from_this<mytype> {
     
     
     
-# Lecture 5. lambda (анонимные функции)
+# Lecture 5. lambda
 
 Тут пример про сортировку и то, как передать туда компаратор: 1 - как функцию (T const& a, T const& b), 2 - как оператор() у какого то класса. По тестам получается, что 1-ый вариант медленнее. Почему? тут связано с тем, сколько время проводится в сорте и сколько в колбэке. Проблема в том, что компилятор не может инлайнить функцию в первом варианте:
 
