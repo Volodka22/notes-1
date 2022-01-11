@@ -1,11 +1,17 @@
 #Contents
 
 [Lecture 1. rvalue-ссылки](#lecture-1-rvalue-ссылки)
+
 [Lecture 2. rvalue-ссылки](#lecture-2-rvalue-ссылки)
+
 [Lecture 3. Intrusive контейнеры](#lecture-3-intrusive-контейнеры)
+
 [Lecture 4. shared_ptr](#lecture-4-shared_ptr)
+
 [Lecture 5. lambda](#lecture-5-lambda)
-[Lecture 6. std::function](#lecture-6-std::function)
+
+[Lecture 6. std::function](#lecture-6-std-function)
+
 [Lecture 7. Сигналы](#lecture-7-сигналы)
 
 
