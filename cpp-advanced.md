@@ -2136,8 +2136,8 @@ void transfer(size_t from, size_t to, int32_t ammount) {
 
 
 **Чем отличаются atomic и volatile?**
-*
-    ```
+
+*   ```
     int* p;
     *p = 42;
     *p = 43;
@@ -2145,8 +2145,7 @@ void transfer(size_t from, size_t to, int32_t ammount) {
     Можно ли не делать запись 42?
     Для volatile p нет, а для atomic p можно, поскольку раньше список значений, к которым был готов код был {0, 42, 43}, значит и к {0, 43} он будет готов.
     
-*
-    ```
+*   ```
     int* p;
     atomic/volatile int* q;
     *p = 10;
