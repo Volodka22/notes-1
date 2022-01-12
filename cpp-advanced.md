@@ -2136,7 +2136,7 @@ void transfer(size_t from, size_t to, int32_t ammount) {
 
 
 **Чем отличаются atomic и volatile?**
-* 
+*
     ```
     int* p;
     *p = 42;
