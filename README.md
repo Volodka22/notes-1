@@ -4,3 +4,4 @@
 
 ## Contents
 * [Advanced C++](cpp-advanced.md)
+* [Functional Programming](fp.md)
