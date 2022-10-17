@@ -360,3 +360,272 @@ fibs = 0 : 1 : zipWith (+) fibs (drop 1 fibs)
 ## Про полиморфизм
 
 Желание писать более общий код, засовывая в параметры какие-то около-произвольные типы, которые будут абстрактными. То есть от них важно тчобы они просто были, мы не будем напрямую оперировать ими.
+
+
+
+# Lecture 4. Про типы данных, алгебраические типы данных, синонимы и Ad-hoc полиморфизм
+
+Хотим иметь тип пользователя, например, это uid :: Int, login :: String, name :: String. Просто таскать за собой тапл из них -- так себе идея, понятно почему, какие есть варианты реализовать это?
+
+## Type aliases (синонимы типов)
+Похоже на юзинги в плюсах, не дают представления о том, как внутри устроен тип примеры:
+```
+type User = (Int, String, String)
+userFullId :: User -> String
+userFullId (uid, login, name) -> show uid ++ ":" ++ login
+```
+Можно так же параметризовывать:
+```
+type BunaryIntFunction = Int -> Int -> Int
+type String            = [Char]
+type FilePath          = String
+type TripleList a      = [(a, a, a)]
+type SwapPair a b      = (a, b) -> (b, a)
+```
+
+## Про алгебраические типы данных (ADT)
+
+Конъюнкция, дизъюнкция :)
+
+### Произведение типов
+```
+PT = T_1 * T_2 * ... * T_n
+```
+Чиать так:
+> Для типа PT существует экземплярный элеменет этого класса тогда и только тогда, когда существует экземплярный элемент для класса T_1 И экземплярный элемент для класса T_2 И ... И существует экзеплярный элемент для класса T_n. 
+Аналогичное определение можно дать в терменнах **насеенности ножеств**. Множество населено титт, когда оно не пусто. Следовательно, тип населен, если существует хотя бы один элемент этого типа. Тогда:
+
+> Тип PT населен титт, когда населен тип Т_1 И населен тип Т_2 И ... И населен тип T_n.
+
+Похоже на классы в императивных ЯП:
+```
+struct user {
+    int uid;
+    string login;
+    string name;
+};
+
+=> user = int * string * string
+```
+
+### Сумма типов 
+Ну тут аналогично:
+```
+ST = T_1 + T_2 + ... + T_n
+```
+> Для типа ST существует экземплярный элеменет этого класса тогда и только тогда, когда существует ЛИБО экземплярный элемент для класса T_1 ЛИБО экземплярный элемент для класса T_2 ЛИБО ... ЛИБО существует экзеплярный элемент для класса T_n. 
+
+> Тип ST населен титт, когда ЛИБО населен тип Т_1 ЛИБО населен тип Т_2 ЛИБО ... ЛИБО населен тип T_n.
+
+Это, очевидно, аналог std::variant<...>
+
+### ADT
+Формально теперь:
+```
+PrimitiveType ::= Int | Char | Double | ...
+ADT ::= PrimitiveType | ADT + ADT | ADT * ADT
+```
+
+Пока этого достаточно, далее примеры:
+\1. Енум
+```
+data TrafficLight = Red | Yellow | Green
+-- здесь Red, Yellow, Green -- конструкторы типа TrafficLight
+-- чуть подробнее далее, но уже знаем, что по ним можно паттерн-матчиться:
+
+lightName :: TrafficLight -> String 
+lightName Red    = "red"
+lightName Yellow = "yellow"
+lightName Green  = "green"
+```
+\2. Структурка -- полноценный тип данных
+```
+data User = MkUser Int String String
+```
+Здесь важна терминология:
+    * MkUser -- конструктор данных -- в телах констант
+    * Int String String -- поля типа
+    * User -- конструктор типа (имя типа) -- в сигнатурах
+```
+getUid :: User -> Int -- селектор
+getUid (MkUser uid _ _) = uid
+
+getName :: User -> String
+getName (MkUser _ _ name) = name
+
+ghci> :t MkUser
+MkUser :: Int -> String -> String -> User
+```
+! У конструктора всегда возращаемый тип в точности равен тому типу, в котором этот конструктор задан
+\3. ADT -- можем параметризировать
+```
+data Point2D a = Point2D a a
+
+point2List :: Point2D a -> [a]
+point2List (Point2D x y) = [x, y]
+
+doublePoint :: Point2D a -> Point2D (a, a)
+doublePoint (Point2D x y) = Point2d (x, y) (x, y) 
+
+maxCoord :: Point2D Int -> Int
+maxCoord (Point2D x y) = max x y
+
+distFromZero :: Point2D Double -> Double
+distFromZero (Point2D x y) = sqrt (x ^ 2 + y ^ 2)
+```
+\4. ADT -- сумма типов
+```
+data IntResult = Success Int
+               | Failure String
+               
+ghci> :t Success
+Success :: Int -> IntResult -- аналогично ремарке (!) выше
+ghci> :t Failure
+Failure :: String -> IntResult -- аналогично ремарке (!) выше
+
+safeDiv :: Int -> Int -> IntResult
+safeDiv _ 0 = Failure "division by zero :("
+safeDiv x y = Success $ div x y
+
+-- обратно:
+showResult :: IntResult -> String
+showResult (Success value) = "Result: " ++ show value
+showResult (Failure err) = "Error: " ++ err
+```
+\5. ADT -- параметризованная сумма типов
+```
+data Vector a = Vector2D a a | Vector3D a a a
+
+packVector :: Vector a -> [a]
+packVector (Vector2D x y)   = [x, y]
+packVector (Vector3D x y z) = [x, y, z]
+
+vecLen :: Vector Double -> Double
+vecLen = sqrt . sum . map (^2) . packVector
+```
+\6. Maybe
+```
+data Maybe a = Nothing | Just a
+-- здесь слово Maybe еще называется _контекстом_, в который Just оборачивает значение
+
+maybeSecond :: [a] -> Maybe a
+maybeSecond (_:x:_) = Just x
+maybeSecond _       = Nothing
+```
+\7. Either
+```
+data Either a b = Left a | Right b -- порядок важен, об этом в lectures 6-7
+
+eitherSecond :: [a] -> Either String a
+eitherSecond []      = Left "list is empty"
+eitherSecond [_]     = Left "only one item in list"
+eitherSecond (_:x:_) = Right x
+```
+\8. List -- ADT recoursive
+```
+data List a = Nil | Cons a (List a)
+-- здесь List -- рекурсивный тип, потому что один из его конструкторов, а именно Cons
+-- в качестве своего поля принимает значения типа List, в котором Cons и определен
+
+ghci> :t Nil
+Nil :: List a
+ghci> :t Cons
+Cons :: a -> List a -> List a 
+-- :)
+
+myList :: List Int
+myList = Cons 2 $ Cons 3 $ Cons 1 Nil
+
+myMap :: (a -> b) -> List a -> List b
+myMap _ Nil         = Nil
+myMap f (Cons x xs) = Cons (f x) (myMap f xs)
+```
+На самом деле листы более удобные -- заметим, что конструкторы это просто infixr функции, а значит можно сделать их и infix путем представления их через операторы :))
+```
+data [] = [] | a : [a]
+```
+Тут ```[]``` -- спецсимволы, зарезервированные под списки, а кастомные операторы с текстом должны начинаться с ```:``` -- тут это просто единственный символ имени оператора.
+
+## Про Record Syntax
+
+Бэк ту пример с юзером. Хотим как-то явно указывать, какое из полей произведения типов что означает. Есть вот такая штука -- рекорд (обертка):
+```
+data User = User
+    { uid   :: Int
+    , login :: String
+    , name  :: String
+    }
+```
+Это сахар над этим, а сами uid, name, login это НЕ ПОЛЯ, А так называемые СЕЛЕКТОРЫ или АКСЕССОРЫ или ГЕТТЕРЫ, но лучше называть селекторами -- И ЭТО ФУНКЦИИ:
+```
+data User = User Int String String 
+
+uid :: User -> Int
+uid (User x _ _) = x
+
+login :: User -> String
+login (User _ x _) -> x
+
+name :: User -> String
+name (User _ _ x) -> x
+```
+Как этим пользоваться:
+```
+ivan = User { login = "ivan"
+            , name = "ivan"
+            , uid = 47
+            }
+            
+isIvan :: User -> Bool
+isIvan user = login user == "ivan" -- даже не надо паттерн-матчится, т.к. есть селектор :)
+```
+
+## Record Patterns & Updates
+Можно задать isIvan через паттерн-матчинг:
+```
+isIvan User { login == username } = username == "ivan"
+-- OR --
+isIvan User { login == "ivan" } = True
+isIvan _                        = False
+
+пример из будущего:
+data Person
+    = User { uid :: Int, login :: String }
+    | Admin { aid :: Int, login :: String }
+
+isAdmin :: Person -> Bool
+isAdmin Admin{} = True
+isAdmin _       = False
+
+```
+
+Апдейт (с копированием!) конкретных полей:
+```
+cloneIvan = ivan { login = "cloneIvan" } -- User{47, "cloneIvan", "ivan"}
+```
+
+## Operator record fields (мем)
+```
+ghci> data R = { (-->) :: Int -> Int }
+ghci> let r = R { (-->) = (+1) }
+ghci> r --> 47
+48
+```
+
+## Records and sum types 
+Нужно быть аккуратным с нетотальными селекторами (по сути функциями):
+```
+data Person
+    = User { uid :: Int, login :: String }
+    | Admin { aid :: Int, login :: String }
+
+login :: Person -> String
+login (User _ l) = l
+login (Admin _ l) = l
+
+ghci> uid $ Admin 1 "Bob"
+*** Exception: No match in record selector uid
+```
+  
+  
+  
