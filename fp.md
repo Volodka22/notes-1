@@ -986,3 +986,390 @@ module Baz.B (C.isLower) where
 
 import Data.Char as C
 ```
+
+  
+  
+  
+# Lecture 6. <$> Functor, <*> Applicative. Про базовые тайп-классы
+
+## Semigroup
+Класс с замкнутой бинарной функцией, которая должна быть ассоциативной (обеспечивается программистом):
+```
+-- actually in 'base'
+class Semigroup m where
+    (<>) :: m -> m -> m
+Associativity law for Semigroup: 
+  1. (x <> y) <> z ≡ x <> (y <> z)
+
+1. (++)
+2. max/min
+```
+### Monoids
+Семигруппа с нейтральным элементом относительно (<>) (оператор diamond :) )
+```
+-- also in 'base' but...
+class Semigroup m => Monoid m where
+    mempty :: m
+Identity laws for Monoid: 
+  2. x <> mempty ≡ x
+  3. mempty <> x ≡ x
+  
+1. (++)
+```
+
+**Формальное определение Semigroup**:
+```
+class Semigroup a where
+    (<>)    :: a -> a -> a
+    sconcat :: NonEmpty a -> a
+    stimes  :: Integral b => b -> a -> a
+    {-# MINIMAL (<>) #-}
+
+instance Semigroup [a] where
+    (<>) = (++)
+
+ghci> [1..5] <> [2,4..10]
+[1,2,3,4,5,2,4,6,8,10]
+```
+Здесь sconcat функция над списком из элементов типа a, причем не пустым -- она буквально применяет оператор даймонд над списком, сворачивая их в один элемент типа a. NonEmpty -- фактически то же самое, что и писок, только в нем нет конструктора пустого списка. А stimes крутая, потому что похволяет сделать так:
+```
+ghci> concat (replicate 3 [1..5])
+[1, 2, 3, 4, 5, 1, 2, 3, 4, 5, 1, 2, 3, 4, 5]
+
+ghci> 3 `stimes` [1..5]
+[1, 2, 3, 4, 5, 1, 2, 3, 4, 5, 1, 2, 3, 4, 5]
+```
+
+Ситуация: хочется полугруппу с двумя операциями даймонд, как быть --Вопользоваться оберткой :)
+```
+newtype Sum     a = Sum     { getSum     :: a }
+newtype Product a = Product { getProduct :: a }
+
+instance Num a => Semigroup (Sum a) where
+  Sum x <> Sum y = Sum (x + y)
+
+instance Num a => Semigroup (Product a) where
+  Product x <> Product y = Product (x * y)
+  
+ghci> 3 <> 5 :: Sum Int
+Sum { getSum = 8 }
+ghci> 3 <> 5 :: Product Int
+Product { getProduct = 15 }
+```
+
+Прикол в том, что дасточно определить одну операцию, чтобы реализовывать логику всего типа, еще примеры:
+```
+newtype Max   a = Max   { getMax   :: a      }  -- max
+newtype Min   a = Min   { getMin   :: a      }  -- min
+newtype Any     = Any   { getAny   :: Bool   }  -- ||
+newtype All     = All   { getAll   :: Bool   }  -- &&
+newtype First a = First { getFirst :: Maybe a}  -- first Just
+newtype Last  a = Last  { getLast  :: Maybe a}  -- last Just
+
+<тут надо соотвествующие инстансы создать еще>
+
+ghci> Max 3 <> Max 10 <> Max 2
+Max { getMax = 10 }
+ghci> Min 3 <> Min 10 <> Min 2
+Min { getMin = 2 }
+
+ghci> Any True <> Any False <> Any True
+Any { getAny = True }
+ghci> All True <> All False <> All True
+All { getAll = False }
+
+ghci> First Nothing <> First (Just 10) <> First (Just 1)
+First { getFirst = Just 10 }
+ghci> Last (Just 2) <> Last (Just 1) <> Last Nothing
+Last { getLast = Just 1 }
+```
+
+**Формальное определение Monoid**:
+```
+class Semigroup a => Monoid a where
+    mempty  :: a
+    mappend :: a -> a -> a -- обычно он равен (<>)
+    mconcat :: [a] -> a
+    {-# MINIMAL mempty #-}
+```
+Примеры:
+```
+instance Monoid [a] where
+    mempty          = []
+    l1 `mappend` l2 = l1 ++ l2
+    
+instance (Monoid a, Monoid b) => Monoid (a,b) where
+    mempty                    = (         mempty,          mempty)
+    (a1,b1) `mappend` (a2,b2) = (a1 `mappend` a2, b1 `mappend` b2)
+```
+
+> Тут была страшная картинка про отношения тайп-классов в виде графов
+
+### Блять
+Вот мы жили хорошо, умея определять тип по экземпляру, написать в ghci ```:t```. А как пел Куок: 'плохое точно сбудется', теперь мы хотим уметь узнавать 'тип типа' -- корректнее называется **'kind of type'** -- это позволить размышлять о способностях типа принимать в себя другие типы в качестве параметров:
+```
+ghci> :k Bool
+Bool :: *
+ghci> :k ()
+() :: *
+ghci> :k Ingteger
+Ingeter :: *
+
+ghci> :k Maybe Integer
+Maybe Integer :: *
+ghci> :k Maybe
+Maybe :: * -> *
+
+ghci> -- data [] a = [] | a : ([] a)
+ghci> :k [Char]
+[Char] :: *
+ghci> :k []
+[] :: * -> *
+
+ghci> -- data Either a b
+ghci> :k Either
+Either :: * -> * -> *
+
+ghci> data D m a = D (m a)
+ghci> :k D
+D :: (* -> *) -> * -> *
+
+ghci> -- class Num a where
+ghci> :k Num
+Num :: * -> Constraint
+ghci> :t (+)
+(+) :: Num a => a -> a -> a
+```
+Про констрейнты будет позже, но вроде этот пример должен был навести на мысли о схожести с определение типа экземпляра
+
+
+## Foldable
+
+Есть функции foldr и foldl, они вот такие и вроде понятно, что делают на условном примере списка:
+```
+foldr :: (a -> b -> b) -> b -> [a] -> b
+foldl :: (b -> a -> b) -> b -> [a] -> b 
+```
+Ща разъеб будет. Мы только что увидели, что кайнд списка -- это ```* -> *```, тогда можно оБоБщИтЬ свертки на вообще произвольный тип, котораый удовлетваоряет констрейнту Foldable:
+```
+foldr :: Foldable t => (a -> b -> b) -> b -> t a -> b
+foldl :: Foldable t => (b -> a -> b) -> b -> t a -> b 
+```
+Вроде очевидные примеры:
+```
+ghci> foldr (+) 0 [2, 1, 10] -- (2 + (1 + (10 + 0)))
+13
+ghci> foldr (*) 3 [2, 1, 10] -- (2 * (1 * (10 * 3)))
+60
+```
+
+**Формальное определение Foldable**:
+```
+-- | Simplified version of Foldable
+class Foldable t where
+    {-# MINIMAL foldMap | foldr #-}
+
+    fold    :: Monoid m => t m -> m
+    foldMap :: Monoid m => (a -> m) -> t a -> m
+    foldr   :: (a -> b -> b) -> b -> t a -> b 
+```
+Важно заметить, что тут везде кайнд у типа t это ```* -> *```. Вот такой мем, расписывать его не хочется, думаю понятно, что тут происходит. 
+
+Примеры:
+```
+instance Foldable [] where
+    foldr :: (a -> b -> b) -> b -> [a] -> b
+    foldr _ z []     =  z
+    foldr f z (x:xs) =  x `f` foldr f z xs
+```
+^ Важно, что тут [], а не [a], потому что мы должны совпадать по кайндам.
+```
+instance Foldable Maybe where
+    foldr :: (a -> b -> b) -> b -> Maybe a -> b
+    foldr _ z Nothing  = z
+    foldr f z (Just x) = f x z
+
+ghci> foldr (+) 1 (Just 3)
+4
+ghci> foldr (+) 0 Nothing
+0
+```
+
+## Functor <$>
+
+Теперь можно нормально дать определение слову **контекст** -- тип, функтор которого ```* -> *```.
+Иногда хочется уметь оперировать над значениями, завернутыми в контекст. Напрмер, есть Maybe(2), хотим сделать +3 и получить Maybe(5).
+
+Для таких приколов в функциональном мире есть fmap -- она по сути просто пропихивает функцию в контекст:
+```
+ghci> fmap (+3) (Just 2)
+Just 5
+ghci> fmap (+3) Nothing
+Nothing
+```
+
+**Около-формальное определение Functor**:
+```
+class Functor f where               -- f :: * -> *
+    fmap :: (a -> b) -> f a -> f b
+
+Functor laws:
+1. fmap id      ≡ id
+2. fmap (f . g) ≡ fmap f . fmap g
+```
+
+Примеры:
+```
+instance Functor Maybe where
+    fmap :: (a -> b) -> Maybe a -> Maybe b
+    fmap f (Just x) = Just (f x)
+    fmap f Nothing  = Nothing
+
+```
+Лист -- тоже Фанктор:
+```
+instance Functor [] where
+    fmap :: (a -> b) -> [a] -> [b]
+    fmap = map
+
+ghci> fmap (*2) [1..3]
+[2,4,6]
+ghci> map (*2) [1..3]
+[2,4,6]
+ghci> fmap (*2) []
+[]
+```
+
+### Arrow Funtor
+Функция в Хаскелле это тоже тип данных, причем если посмотреть его кайнд, то увидим ```(->) :: * -> * -> *```, то есть при фиксированном типе аргумента, функция фазвращает фанктор. Вау. Тогда верно:
+```
+instance Functor ((->) r)  where
+    fmap :: (a -> b) -> (r -> a) -> r -> b
+    fmap = (.)
+    
+ghci> let foo = fmap (+3) (+2)
+ghci> foo 10
+15
+```
+
+## Applicative Functors
+Мотивация:
+```
+ghci> :t fmap (++) (Just "hey")
+fmap (++) (Just "hey") :: Maybe ([Char] -> [Char])
+
+ghci> :t fmap compare (Just 'a')
+fmap compare (Just 'a') :: Maybe (Char -> Ordering)
+
+ghci> let a = fmap (*) [1,2,3,4]
+ghci> :t a
+a :: [Integer -> Integer]
+ghci> fmap (\f -> f 9) a
+[9,18,27,36]
+```
+**Формальное определение Applicative Functor**:
+```
+class Functor f => Applicative f where  -- f :: * -> *
+    pure  :: a -> f a
+    (<*>) :: f (a -> b) -> f a -> f b
+    liftA2 :: (a -> b -> c) -> f a -> f b -> f c  -- since GHC 8.2.1
+    {-# MINIMAL pure, ((<*>) | liftA2) #-}
+    
+    
+Applicative laws:
+1. identity
+   pure id <*> v ≡ v
+
+2. composition
+   pure (.) <*> u <*> v <*> w ≡ u <*> (v <*> w)
+
+3. homomorphism
+   pure f <*> pure x ≡ pure (f x)
+
+4. interchange
+   u <*> pure y ≡ pure ($ y) <*> u
+```
+Примеры:
+\1. Maybe Applicative
+```
+instance Applicative Maybe where
+    pure :: a -> Maybe a
+    pure = Just
+    
+    (<*>) :: Maybe (a -> b) -> Maybe a -> Maybe b
+    Nothing <*> _         = Nothing
+    Just f  <*> something = fmap f something
+    
+ghci> Just (+3) <*> Just 9
+Just 12
+ghci> pure (+3) <*> Just 10
+Just 13
+ghci> Just (++"hahah") <*> Nothing
+Nothing
+```
+\2. List Applicative
+Какие-то заумные штуки начались:
+```
+instance Applicative [] where
+    pure :: a -> [a]
+    pure x    = [x]
+
+    (<*>) :: [a -> b] -> [a] -> [b]
+    fs <*> xs = [f x | f <- fs, x <- xs] -- тут важен порядок, т.к. более дальнее упоминание = более частое итеррирование
+
+    
+ghci> [(*2), (+3)] <*> [1, 2, 3]
+[2, 4, 6, 4, 5, 6]
+
+ghci> [ x*y | x <- [2,5,10], y <- [8,10,11]]
+[16,20,22,40,50,55,80,100,110]
+
+ghci> (*) <$> [2,5,10] <*> [8,10,11]
+[16,20,22,40,50,55,80,100,110]
+```
+
+\3. Arrow Applicative
+Еще более умные штуки:
+```
+instance Applicative ((->) r) where
+    pure :: a -> r -> a
+    pure x  = \_ -> x
+
+    (<*>) :: (r -> a -> b) -> (r -> a) -> r -> b
+    f <*> g = \x -> f x (g x)
+
+ghci> :t (+) <$> (+3) <*> (*100)
+(+) <$> (+3) <*> (*100) :: (Num a) => a -> a
+
+ghci> (+) <$> (+3) <*> (*100) $ 5
+508
+
+ghci> (\x y z -> [x,y,z]) <$> (+3) <*> (*2) <*> (/2) $ 5
+[8.0,10.0,2.5]
+```
+
+### Applicative vs. Functor
+:(
+```
+ghci> (*) <$> Just 5 <*> Just 3
+Just 15
+ghci> liftA2 (*) (Just 5) (Just 3)
+Just 15
+
+ghci> :t liftA3
+liftA3 :: Applicative f => (a -> b -> c -> d) -> f a -> f b -> f c -> f d
+
+ghci> import Data.Char (isUpper, isDigit)
+ghci> import Control.Applicative (liftA2)
+ghci> let isUpperOrDigit = liftA2 (||) isUpper isDigit
+ghci> :t isUpperOrDigit 
+isUpperOrDigit :: Char -> Bool
+ghci> isUpperOrDigit 'A'
+True
+ghci> isUpperOrDigit '3'
+True
+ghci> isUpperOrDigit 'a'
+False
+```
+
+
