@@ -629,3 +629,357 @@ ghci> uid $ Admin 1 "Bob"
   
   
   
+# Lecture 5. Всё о том же
+
+Поняли что совмещать рекорд-синтаксис с суммой типов не круто, потому что могкть быть нетотальные селекторы. А что тогда делать?
+```
+data Man = Man { name :: String }
+data Cat = Cat { name :: String }
+
+ghci> :t name
+???
+```
+В ванильном Хаскелле так нельзя, но можно дописать суффикс типа и проблемы не будет, либо заюзать расширение -XDuplicateRecordFields:
+```
+{-# LANGUAGE DuplicateRecordFields #-}
+
+data Man = Man { name :: String }
+data Cat = Cat { name :: String }
+
+shoutOnHumanBeing :: Man -> String
+shoutOnHumanBeing man = (name :: Man -> String) man ++ "!!1!"  -- though...
+
+isGrumpy :: Cat -> Bool
+isGrumpy Cat{ name = "Grumpy" } = True
+isGrumpy _                      = False
+```
+
+## RecordWildCards
+
+Помним, что 'мемберы' типа это селекторы, но с рассширением -XRecordWildCards можно чтобы помимо селекторов создались буквально поля с такими же именами, нужно указать ```..``` для этого:
+```
+{-# LANGUAGE RecordWildCards #-}
+
+data User = User 
+    { uid      :: Int
+    , login    :: String
+    , password :: String 
+    } deriving (Show)
+
+toUnsafeString :: User -> String
+toUnsafeString User{ uid = 0, .. } = "ROOT: " ++ login ++ ", " ++ password
+toUnsafeString User{..}            = login ++ ":" ++ password
+```
+Можно написать такую хуйню, она будет работать по совпадению имен и типов полей работать:
+```
+evilMagic :: Man -> Cat
+evilMagic Man{..} = Cat{..}
+
+ghci> evilMagic $ Man "Grumpy"
+Cat {name = "Grumpy"}
+```
+
+## newtype 
+
+Этот кейворд можно использовать тольо в контексте data, если выполнено, что тип имеет ровно один конструктор, который принимает в себя ровно один аргумент -- по сути просто обертка над типом:
+```
+data    Message = Message String
+newtype Message = Message String
+```
+
+## Type classes -- реализация Ad-hoc полиморфизма
+
+Эд-хок полиморфизм -- это как интерфейсы в джаве. ПО сути разница такая: при параметрическом полиморфизме функция ведет себя одинаково для экземпляра  любого типа, а здесь -- поведение определяется тем, какого конкретна класса инстанс был передан. Этот механизм реализуют **классы типов**:
+```
+class Printable p where  -- we don't care what 'p' stores internally
+    printMe :: p -> String
+```
+
+Важно: **data** для того чтобы определить, что храним; **class** чтобы определить, что делаем с хранящимися данными.
+Их можно связать через кейворд **instance**:
+```
+data Foo = Foo | Bar  -- don't care what we can do with 'Foo', care what it stores
+
+instance Printable Foo where
+    printMe Foo = "Foo"
+    printMe Bar = "Bar (whatever)"
+```
+Теперь эти можно пользоваться как констрейнтами на функции:
+```
+helloP :: Printable p => p -> String
+helloP p = "Hello, " ++ printMe p ++ "!"
+```
+
+Базовые хайповые классы типов:
+\1. Eq
+```
+class Eq a where  
+    (==) :: a -> a -> Bool  
+    (/=) :: a -> a -> Bool
+ 
+    x == y = not (x /= y)  
+    x /= y = not (x == y)
+    {-# MINIMAL (==) | (/=) #-}  -- minimal complete definition
+```
+Тут прикол в том, что иногда не хочется переопределять кучу однотипных операторов и можно задавать их уловно-рекурсивно, указав минимальную прагму -- множество операторов, которые нужно явно задать в инстансе, чтобы финальный инстанс бл полностью собран. Например, c прагмой -XInstanceSigs млжно еще и явно указать сигнатуру операторов в инстансе:
+```
+{-# LANGUAGE InstanceSigs #-}
+
+data TrafficLight = Red | Yellow | Green
+
+instance Eq TrafficLight where
+    (==) :: TrafficLight -> TrafficLight -> Bool
+    Red    == Red    = True  
+    Green  == Green  = True  
+    Yellow == Yellow = True 
+         _ == _      = False
+```
+Или вот еще:
+```
+threeSame :: Eq a => a -> a -> a -> Bool
+threeSame x y z = x == y && y == z
+
+ghci> threeSame Red Red Red
+True
+ghci> threeSame 'a' 'b' 'b'
+False
+```
+\2. Ord
+Ну понятно что это вроде
+```
+data Ordering = LT | EQ | GT
+
+-- simplified version of Ord class
+class Eq a => Ord a where
+   compare              :: a -> a -> Ordering
+   (<), (<=), (>=), (>) :: a -> a -> Bool
+
+   compare x y
+        | x == y    =  EQ
+        | x <= y    =  LT
+        | otherwise =  GT
+
+   x <= y           =  compare x y /= GT
+   x <  y           =  compare x y == LT
+   x >= y           =  compare x y /= LT
+   x >  y           =  compare x y == GT
+   
+   {-# MINIMAL compare | (<=) #-}
+```
+
+\3. Num
+Числа с арифметкой по сути
+```
+-- | Basic numeric class.
+class Num a where
+    {-# MINIMAL (+), (*), abs, signum, fromInteger, (negate | (-)) #-}
+
+    (+), (-), (*)       :: a -> a -> a  -- self-explained
+    negate              :: a -> a       -- unary negation
+    abs                 :: a -> a       -- absolute value
+    signum              :: a -> a       -- sign of number, abs x * signum x == x
+    fromInteger         :: Integer -> a -- used for numeral literals polymorphism
+
+    x - y               = x + negate y
+    negate x            = 0 - x
+```
+Тут можно написать 0 потому что это сахар над ```fromIntager 0```
+Примеры:
+```
+ghci> :t 5
+5 :: Num p => p
+ghci> :t fromInteger 5
+fromInteger 5 :: Num a => a
+ghci> 5 :: Int
+5
+ghci> 5 :: Double
+5.0
+```
+\4. Show
+```
+-- simplified version; used for converting things into String
+class Show a where
+    show :: a -> String
+```
+Примеры:
+```
+ghci> 5
+5
+ghci> show 5
+"5"
+ghci> "5"
+"5"
+ghci> show "5"
+"\"5\""
+```
+У всех Num свои show определены:
+```
+ghci> 5 :: Int
+5
+ghci> 5 :: Double
+5.0
+ghci> 5 :: Rational
+5 % 1
+
+```
+
+\5. Read -- дуальный к show
+```
+-- simplified version; used for parsing thigs from String
+class Read a where
+    read :: String -> a
+```
+По сути -- попытка распарсить строку в конструктор данных, но нужно быть аккуратным -- нужно явно указывать тип того, что ты ждешь (пример 3), иначе будет подставлен **unit-тип** -- енум с конструктором ```()``` без аргументов (пример 2):
+```
+ghci> :t read
+read :: Read a => String -> a
+ghci> read "True"
+*** Exception: Prelude.read: no parse
+ghci> read "True" :: Bool
+True
+```
+
+Поэтому лучше пользоваться безопасными классами типов -- readMaybe/readEither --  те же самые риды, обернутые в соответствующие контексты: 
+```
+ghci> :module Text.Read
+
+ghci> :t readMaybe
+readMaybe :: Read a => String -> Maybe a
+ghci> :t readEither 
+readEither :: Read a => String -> Either String a
+ghci> readMaybe "5" :: Maybe Int
+Just 5
+ghci> readMaybe "5" :: Maybe Bool
+Nothing
+ghci> readEither "5" :: Either String Bool -- don't worry, convenient way exist
+Left "Prelude.read: no parse"
+```
+
+## Больше примеров ад-хок полиморфизма
+
+```
+subtract :: Num a => a -> a -> a
+subtract x y = y - x
+
+ghci> :info Fractional
+class Num a => Fractional a where
+  (/) :: a -> a -> a
+  recip :: a -> a
+  fromRational :: Rational -> a
+  {-# MINIMAL fromRational, (recip | (/)) #-}
+  	-- Defined in ‘GHC.Real’
+instance Fractional Float -- Defined in ‘GHC.Float’
+instance Fractional Double -- Defined in ‘GHC.Float’
+
+average :: Fractional a => a -> a -> a
+average x y = (x + y) / 2
+```
+
+```
+ghci> cmpSum x y = if x < y then x + y else x * y
+ghci> :t cmpSum
+cmpSum :: (Ord a, Num a) => a -> a -> a
+```
+И еще прикол, можно множественные констрейнты записывать не только туплом но и в каррированном виде: ```cmpSum :: Ord a => Num a => a -> a -> a``` :)
+
+## про undefined
+
+Я хз что тут писать, по сути этокласс с наиболее общим типом -- без единого контрейнта, когда вызывается выисление экземпляра этого класса вылетает error => +- логично, что не стоит его вызывать. В продакшене может использоваться как заглушка для чего-то, что еще не написано, но будеь в скором времени. Тогда можно затайпчекать сразу, а дописать потом :)
+
+## про deriving
+
+Автоматическое создание инстансов класса типов компилятором:
+```
+data TrafficLight = Red | Yellow | Green | Blue
+    deriving (Eq, Ord, Enum, Bounded, Show, Read, Ix)
+
+ghci> show Blue
+"Blue"
+ghci> read "Blue" :: TrafficLight 
+Blue
+ghci> Red == Yellow  -- (==) is from Eq  class
+False
+ghci> Red < Yellow   -- (<)  is from Ord class
+True
+
+ghci> :t fromEnum 
+fromEnum :: Enum a => a -> Int
+ghci> :t toEnum 
+toEnum :: Enum a => Int -> a
+ghci> fromEnum Green
+2
+ghci> toEnum 2 :: TrafficLight 
+Green
+
+ghci> :t maxBound 
+maxBound :: Bounded a => a
+ghci> maxBound :: TrafficLight  -- Bounded also has 'minBound'
+Blue
+ghci> [Yello .. maxBound]  -- .. is from Enum instance
+[Yellow, Green, Blue] 
+```
+
+**Для функций дерайвинг не разрешен, потому что банально не понятно, а что делать**.
+
+Есть деррайвинг и для newtype -- нужна только прагма -XGeneralizedNewtypeDeriving -- синтаксис аналогичный, но есть прикол, что зачастую там настолько много всего нужно задеррайвить, чтобы организовать одну конуретную логику, что прям больно читать. Вроде на какой-то из следующих лекций будет рассказ про стратегии для деррайвинга
+
+## Modules cheatsheet
+
+Это все пишется в Extensions.hs, или типо того.
+Имя модуля пишется после прагм и до испортов, в фигурных скобках указываем все, что хотим экспортировать, у конструкторов типов можно указать, какие конструкторы данных можно будет использовать (или ```..```, если все)
+**Импортируется все, что экспортируется из импортируемого модуля.** Но можно через кейворд **hiding** ограничить эту область.
+
+Можно еще алаисы указывать через ```AS```. Если после импорта указан кейворд **qualified**, то нужно писать полное квалифайд имя объекта: ```<имя модуля>.<имя объекта>```, если нет -- то как хочешь, но надо помнить про краши имен. 
+```
+module Lib 
+       ( module Exports
+       , FooB1 (..), FooB3 (FF)
+       , Data.List.nub, C.isUpper
+       , fooA, bazA, BAZB.isLower
+       ) where
+
+import           Foo.A
+import           Foo.B     (FooB2 (MkB1), 
+                            FooB3 (..))
+import           Prelude   hiding (print)
+import           Bar.A     (print, (<||>))
+import           Bar.B     ()
+
+import           Baz.A     as BAZA  
+import qualified Data.List
+import qualified Data.Char as C hiding (chr)
+import qualified Baz.B     as BAZB (isLower)
+
+import qualified Foo.X     as Exports
+import qualified Foo.Y     as Exports
+```
+```
+module Foo.A where fooA = 3
+module Foo.B 
+       ( FooB1, FooB2 (..), 
+         FooB3 (FF, val)
+       ) where
+
+data FooB1 = MkFooB1
+data FooB2 = MkB1 | MkB2
+data FooB3 = FF { val :: Int }
+```
+Важный момент -- тут пустые скобки у экспортируемого модуля, они означают, что модуль ничего не экспортирует. **НО ИНСТАНСЫ ЭКСПОРТИРУЮТСЯ ВСЕГДА, КАК БЫ ТЫ НЕ ПЫТАЛСЯ ЭТОГО НЕ ДОПУСТИТЬ :)**. То есть тут экспортирован будет только instance Printable Int:
+```
+module Bar.B () where
+
+class Printable p where 
+    printMe :: p -> String
+
+instance Printable Int where 
+    printMe = show
+```
+```
+module Baz.A (bazA) where bazA = map
+```
+Какой-то пример форвард-экспорта:
+```
+module Baz.B (C.isLower) where 
+
+import Data.Char as C
+```
