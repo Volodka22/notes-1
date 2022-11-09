@@ -1371,5 +1371,352 @@ True
 ghci> isUpperOrDigit 'a'
 False
 ```
+  
+# Lecture 7: Applicative style programming, Phantom types
 
+## Пример использования liftA3
+  
+```
+data User = User
+    { userFirstName :: String
+    , userLastName  :: String
+    , userEmail     :: String
+    }
+  
+type Profile = [(String, String)]
 
+profileExample = 
+    [ ("first_name", "Pat"            )
+    , ("last_name" , "Brisbin"        )
+    , ("email"     , "me@pbrisbin.com")
+    ]
+  
+lookup "first_name" p :: Maybe String
+
+buildUser :: Profile -> Maybe User
+buildUser p = User
+    <$> lookup "first_name" p
+    <*> lookup "last_name"  p
+    <*> lookup "email"      p
+-- using liftA* common pattern
+buildUser :: Profile -> Maybe User
+buildUser p = liftA3 User
+                     (lookup "first_name" p)
+                     (lookup "last_name"  p)
+                     (lookup "email"      p)
+```
+      
+## Alternative
+Это моноид апплекативных функторов: <|> - возвращает первое не "ошибочное" значение, empty - "ошибочное" значение
+```
+class Applicative f => Alternative f where
+    empty :: f a
+    (<|>) :: f a -> f a -> f a
+COPY
+instance Alternative Maybe where
+    empty :: Maybe a
+    empty = Nothing
+
+    (<|>) :: Maybe a -> Maybe a -> Maybe a
+    Nothing <|> r = r
+    l       <|> _ = l
+ghci> Nothing <|> Just 3 <|> empty <|> Just 5
+Just 3
+instance Alternative [] where
+    empty :: [a]
+    empty = []
+    
+    (<|>) :: [a] -> [a] -> [a]
+    (<|>) = (++)
+ghci> [] <|> [1,2,3] <|> [4]
+[1,2,3,4]   
+```
+      
+## Traversable
+Принимает контейнер наследованный от Functor и Foldable. Traverse - это как foldr, но не свертывает контейнер: "-> f (t b)"
+      
+```
+class (Functor t, Foldable t) => Traversable t where
+    traverse  :: Applicative f => (a -> f b) -> t a -> f (t b)
+    sequenceA :: Applicative f => t (f a) -> f (t a)
+ghci> let half x = if even x then Just (x `div` 2) else Nothing
+ghci> traverse half [2,4..10]
+Just [1,2,3,4,5]
+ghci> traverse half [1..10]
+Nothing
+instance Traversable Maybe where
+    traverse :: Applicative f => (a -> f b) -> Maybe a -> f (Maybe b)
+    traverse _ Nothing  =
+    traverse f (Just x) =
+instance Traversable Maybe where
+    traverse :: Applicative f => (a -> f b) -> Maybe a -> f (Maybe b)
+    traverse _ Nothing  = pure Nothing
+    traverse f (Just x) = Just <$> f x
+instance Traversable [] where
+    traverse :: Applicative f => (a -> f b) -> [a] -> f [b]
+    traverse f = foldr consF (pure [])
+      where 
+        consF x ys = (:) <$> f x <*> ys
+```
+## Phantom types
+Проблема: 
+```
+newtype Hash = MkHash String
+class Hashable a where
+hash :: a -> Hash
+hashPair :: Int -> Hash
+hashPair n = hash (n, n)
+hashPair :: Int -> Hash
+hashPair n = hash n  -- oops, this is valid definition!
+```
+Хотим уточнить тип функции
+```
+newtype Hash a = MkHash String -- `a` is a phantom type, not present in constructor
+class Hashable a where
+hash :: a -> Hash a
+hashPair :: Int -> Hash (Int, Int)
+hashPair n = hash (n, n)
+hashPair :: Int -> Hash (Int, Int)
+hashPair n = hash n  -- This is no longer a valid definition!
+```
+## Type @pplication
+Не компилится:
+```
+-- v2.0.0: compiles or not?
+-- v3.0.0: doesn't compile!
+prepend2 :: a -> [a] -> [a]
+prepend2 x xs = pair ++ xs 
+where pair :: [a]
+      pair = [x, x] 
+```
+Потому что компилятор считает, что это две различные связки forall. 
+```
+prepend2 :: forall a . a -> [a] -> [a]
+prepend2 x xs = pair ++ xs 
+  where 
+    pair :: forall a . [a]
+    pair = [x, x] 
+```
+Решается добавлением экстеншина {-# LANGUAGE ScopedTypeVariables #-}
+## XTypeApplications
+```
+ghci> read "3"   :: Int   -- Было
+ghci> rread @Int "3" -- Стало 
+```
+Пиши как удобней!
+
+## -XAllowAmbiguousTypes
+Не компилится :(
+```
+class Size a where
+    size :: Int
+    • Could not deduce (Size a)
+      from the context: Size a
+        bound by the type signature for:
+                   size :: forall a. Size a => Int
+```
+Решение: 
+```
+{-# LANGUAGE AllowAmbiguousTypes #-}
+
+class Size a where size :: Int
+instance Size Int    where size = 8
+instance Size Double where size = 16
+ghci> size @Double  -- use -XTypeApplications
+16
+```
+# Lectures 8-9 Monads
+```
+class Monad m where   -- m :: * -> *
+    return :: a -> m a                  -- return
+    (>>=)  :: m a -> (a -> m b) -> m b  -- bind
+```
+## Maybe Monad
+Пример реализации и использования:
+```
+instance Monad Maybe where
+    return :: a -> Maybe a
+    return = Just
+  
+    (>>=) :: Maybe a -> (a -> Maybe b) -> Maybe b
+    Nothing >>= _ = Nothing
+    Just a  >>= f = f a
+
+monadPair :: Monad m => m a -> m b -> m (a, b)    -- polymorphic implementation
+monadPair ma mb = ma >>= \a -> mb >>= \b -> return (a, b)      
+      
+mkUser :: String -> Maybe Username  -- FP programming pattern: smart constructor
+mkUser name = stripUsername name >>= validateLength 15 >>= return . Username
+
+```
+Вместо:
+```
+maybePair :: Maybe a -> Maybe b -> Maybe (a, b)    -- naive implementation
+maybePair Nothing  _        = Nothing
+maybePair _        Nothing  = Nothing
+maybePair (Just a) (Just b) = Just (a, b)
+      
+mkUser :: String -> Maybe Username  -- FP programming pattern: smart constructor
+mkUser name = case stripUsername name of
+    Nothing    -> Nothing
+    Just name' -> case validateLength 15 name' of
+        Nothing     -> Nothing
+        Just name'' -> Just $ Username name''
+```
+      
+## Either monad
+Так как монады можно применять только к * -> *, придется зафиксировать Eather e и работать со вторым типом
+```
+instance Monad (Either e) where ...  -- Either a :: * -> *
+    return :: a -> Either e a
+    return = Right
+
+    (>>=) :: Either e a -> (a -> Either e b) -> Either e b
+    Left e  >>= _ = Left e
+    Right a >>= f = f a
+```
+      
+ ## List Monad
+```
+instance Monad [] where
+    return :: a -> [a]
+    return x = [x]  -- using bender-operator: return = (:[])
+    
+    (>>=) :: [a] -> (a -> [b]) -> [b]
+    l >>= f  = concat (map f l)  -- or using concatMap
+     
+ghci> [10, 5, 7] >>= replicate 3
+[10, 10, 10, 5, 5, 5, 7, 7, 7]
+```
+      
+## Рыбы
+Как композиция, только с монадами. Их нет в дефолт мондах, нужно писать ручками
+```
+(<=<) :: Monad m => (b -> m c) -> (a -> m b) -> a -> m c
+(>=>) :: Monad m => (a -> m b) -> (b -> m c) -> a -> m c
+m >>= (f >=> g) ≡ m >>= f >>= g
+m >>= (f <=< g) ≡ m >>= g >>= f
+(f >=> g) >=> h ≡ f >=> (g >=> h)  
+```
+      
+## Monad zen
+```
+(>>) :: Monad m => m a -> m b -> m b  -- then
+m >> k = m >>= \_ -> k
+      
+ghci> Nothing >> Just 5
+Nothing
+```
+      
+## Join
+```
+join :: Monad m => m (m a) -> m a
+      
+ghci> join [[3, 4], [7, 10]]
+[3, 4, 7, 10]
+```
+      
+## Control.Monad
+Тоже самое что и для аплекативов (даже реализации наследуются), но так исторически сложилось - монады появились раньше
+```
+liftM :: Monad m => (a -> b) -> m a -> m b
+
+ghci> liftM (+1) (Just 3)
+Just 4
+ghci> liftM (+1) Nothing
+Nothing
+      
+liftM2 :: Monad m => (a -> b -> c) -> m a -> m b -> m c
+         
+ghci> liftM2 (+) (Just 1) (Just 2)
+Just 3
+```
+
+## Monadic lows
+```
+1. return a >>= f  ≡ f a                      -- left identity
+2. m >>= return    ≡ m                        -- right identity
+3. (m >>= f) >>= g ≡ m >>= (\x -> f x >>= g)  -- associativity
+```
+## Logging evaluation
+      
+Для чистоты функции можем таскать логи с собой, а потом уже выводить!
+```
+newtype Writer w a = Writer { runWriter :: (a, w) } -- a is value, w is log
+      
+instance Monoid w => Monad (Writer w) where
+    return :: a -> Writer w a
+    return a = Writer (a, mempty)
+    
+    (>>=) :: Writer w a -> (a -> Writer w b) -> Writer w b
+    Writer (a, oldLog) >>= f = let Writer (b, newLog) = f a 
+                               in Writer (b, oldLog <> newLog)
+tell       :: w -> Writer w ()
+execWriter :: Writer w a -> w
+writer     :: (a, w) -> Writer w a
+      
+binPow :: Int -> Int -> Writer String Int
+binPow 0 _      = return 1
+binPow n a
+    | even n    = binPow (n `div` 2) a >>= \b -> 
+                  tell ("Square " ++ show b ++ "\n") >>
+                  return (b * b)
+    | otherwise = binPow (n - 1) a >>= \b -> 
+                  tell ("Mul " ++ show a ++ " and " ++ show b ++ "\n") >>
+                  return (a * b)      
+```
+На самом деле никакого конструктора Writer не существует (там WriterT), поэтому сделали writer.
+Лучше никогда его не использовать, потому что из-за ленивого вычисления копится невычесленный лог (что очень плохо)
+      
+## Reader
+Просто удобная обертка над функцией. 
+```
+newtype Reader e a = Reader { runReader :: e -> a }
+      
+instance Monad (Reader e) where
+    return :: a -> Reader e a
+    return a = Reader $ \_ -> a
+
+    (>>=) :: Reader e a -> (a -> Reader e b) -> Reader e b
+    m >>= f = Reader $ \r -> runReader (f $ runReader m r) r
+      
+ask   :: Reader e e                            -- get whole env
+asks  :: (e -> a) -> Reader e a                -- get part of env
+local :: (e -> b) -> Reader b a -> Reader e a  -- change env locally
+```
+## State monad
+Позволяет добавить императивный синтаксис в мир фп
+```
+newtype State s a = State { runState :: s -> (a, s) }
+
+instance Monad (State s) where
+    return :: a -> State s a
+    return a = State $ \s -> (a, s)
+
+    (>>=) :: State s a -> (a -> State s b) -> State s b
+    oldState >>= f = ...   
+      
+      
+type Stack = [Int]
+
+pop :: State Stack Int
+pop = state $ \(x:xs) -> (x, xs)
+
+push :: Int -> State Stack ()
+push x = state $ \xs -> ((), x:xs)
+stackOps :: State Stack Int
+stackOps = pop >>= \x -> push 5 >> push 10 >> return x
+```
+### Useful function
+      
+```
+get       :: State s s
+put       :: s -> State s ()
+modify    :: (s -> s) -> State s ()
+gets      :: (s -> a) -> State s a
+withState :: (s -> s) -> State s a -> State s a
+evalState :: State s a -> s -> a
+execState :: State s a -> s -> s      
+```
+
+## 
