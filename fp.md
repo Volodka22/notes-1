@@ -1719,4 +1719,742 @@ evalState :: State s a -> s -> a
 execState :: State s a -> s -> s      
 ```
 
-## 
+
+      
+      
+      
+
+# Lecture 10. Про реальный мир
+
+Хочется уметь взаимодействовать с реальным миром, как в императивных языках, например, считывать что-то. Предположим, что мы как-то реализовали функцию getchar:
+```
+getchar :: Char
+get2chars = [getchar, getchar]
+```
+Уже есть проблемы:
+1. Это по сути константа а не функция + она не чистая
+2. Поскольку Хаскелль думает, что все -- чистые функции, он имеет право переупорядочивать вычисления, тем самым get2chars получается не валидной
+3. Вообще в get2chars будет один и тот же символ, т.к. вычисления ленивые
+
+```
+getchar   :: Int -> Char
+get2chars :: Int -> String
+get2chars _ = [getchar 1, getchar 2]
+
+getchar :: Int -> (Char, Int)
+
+get2chars i = [a,b] where (a,i1) = getchar i
+                          (b,i2) = getchar i1
+
+get4chars = [get2chars 1, get2chars 2]
+```
+Добавили некоторый счетчик, чтобы задать номер считывания -- уже лучше: решили 1, решили 3.
+```
+get2chars :: Int -> (String, Int)
+get2chars i0 = ([a,b], i2)  where (a,i1) = getchar i0
+                                  (b,i2) = getchar i1
+get4chars :: Int -> String
+get4chars i0 = (a++b) where (a,i1) = get2chars i0
+                            (b,i2) = get2chars i1
+```
+Добавили связь через ретерн вэлью -- решили 2.
+Мы изобрели I/O Monad :)
+
+### Фейк-реализация монады ИО:
+```
+type IO a  =  RealWorld -> (a, RealWorld)
+
+main :: RealWorld -> ((), RealWorld)
+main :: IO ()
+
+getChar :: RealWorld -> (Char, RealWorld)
+
+--- функция main, считывающая два символа из консоли:
+main :: RealWorld -> ((), RealWorld)
+main world0 = 
+    let (a, world1) = getChar world0
+        (b, world2) = getChar world1
+    in ((), world2)
+```
+Тут решены все проблемы кроме того, что мы можем внутри сделать двойное вычисление от того же токена. Зачем? Непонятно. Но можем. 
+
+Поэтому тут нужны свойства монады, чтобы делигировать на нее контроль этого
+
+### I/O Monad
+```
+newtype IO a = IO {unIO :: State# RealWorld -> (State# RealWorld, a)}
+
+{-# LANGUAGE MagicHash #-}  -- allows using # in names
+data Mystery# a = Magic# a deriving (Show)
+ghci> Magic# 3
+Magic# 3
+ghci> :t Magic# 3
+Magic# 3 :: Num a => Mystery# a
+```
+Здесь # -- позволяет объявлять функции, реализация которых придет, например, из ассемблера (аналог extern "C", как будто)
+Сама монада:
+
+```
+newtype IO a = IO {unIO :: State# RealWorld -> (State# RealWorld, a)}
+data State# s
+data RealWorld
+
+instance Monad IO where
+  IO m >>= k = IO $ \ s -> 
+     case m s of 
+       (new_s, a) -> unIO (k a) new_s
+  
+  return x = IO (\s -> (s, x))
+```
+Здесь RealWorld -- какой-то глобальный контекст, а State# (не монада State!!) -- некоторый дескриптор, позволяющий опознать поток исполнения.
+
+### do-notation (do, <-)
+
+Позволяет дропать zen (>>):
+```
+(>>) :: IO a -> IO b -> IO b
+
+(action1 >> action2) world0 =
+    let (_, world1) = action1 world0
+       (b, world2) = action2 world1
+    in (b, world2)
+
+--- Тогда можно писать так:
+putStrLn :: String -> IO ()
+
+main = do putStrLn "Hello!"
+main = putStrLn "Hello!"
+
+--- выглядит неочень полезно для одного действия, но для пачки - круто:
+main = do putStrLn "What is your name?"
+          putStrLn "How old are you?"
+          putStrLn "Nice day!"
+
+main = putStrLn "What is your name?" >>
+       putStrLn "How old are you?"   >>
+       putStrLn "Nice day!"
+```
+
+Пачку действий можно записать и так:
+```
+ioActions :: [IO ()]
+ioActions = [ print "Hello!"
+            , putStr "just kidding"
+            , getChar >> return ()
+            ]
+
+main = do head ioActions
+          ioActions !! 1
+          last ioActions
+
+--- выглядит внешне легко, но стремно так делать, есть sequence_ 
+--- (_ означает, что вернется юнит -- т.е. нам не важен результат)
+--- аналог из монады traversible:
+
+sequence_ :: [IO a] -> IO ()
+
+main = sequence_ ioActions
+sequence_ :: [IO a] -> IO ()
+sequence_ []     = return ()
+sequence_ (x:xs) = do x
+                      sequence_ xs
+
+--- пишется вообще чиллово :)
+```
+
+Также в ду-нотацию можно запихнуть и бинд:
+```
+(>>=) :: IO a -> (a -> RealWorld -> (b, RealWorld)) -> IO b
+
+(action1 >>= action2) world0 =
+    let (a, world1) = action1 world0
+       (b, world2) = action2 a world1
+    in (b, world2)
+    
+
+getLine :: IO String
+--- все это эквивалентно:
+main = do s <- getLine  --- похоже на R :) - засовываемм в переменную результат функции
+          putStrLn s
+          
+main = getLine >>= \s ->
+       putStrLn s
+
+main = getLine >>= putStrLn
+```
+
+Пример:
+```
+main = do putStr "What is your name?"
+          a <- readLn
+          putStr "How old are you?"
+          b <- readLn
+          print (a,b)
+          
+---  тоже самое, что и:
+main =    putStr "What is your name?" >>
+          readLn >>= \a -> 
+          putStr "How old are you?" >>
+          readLn >>= \b -> 
+          print (a,b)
+```
+
+#### про return в do-notation
+```
+return :: a -> IO a
+return a world0 = (a, world0)
+getReversedLine :: IO String
+getReversedLine = do
+    s <- getLine
+    return $ reverse s
+
+main :: IO ()
+main = do
+    rs <- getReversedLine
+    putStrLn rs
+```
+
+Если хотим, чтобы функция возвращала что-то, завернутое в монадный контекст, можно писать ретерн, здесь (и только здесь) он похоже на плюсовый. НО:
+```
+main = do a <- readLn
+          if a >= 0 then 
+              return ()
+          else do
+              putStrLn "a is negative"
+
+          putStrLn "a is positive"  -- is this executed?
+```
+Поскольку if это экспрешен, последняя строка будет выводиться всегда
+
+#### про let в do-notation
+
+Можно делать let, просто не написав in:
+```
+main :: IO ()
+main = do
+    s <- getLine
+    let rs = reverse s
+    putStrLn $ "Reversed input : " ++ rs
+
+--- desugars into:
+main :: IO ()
+main =     getLine >>= \s -> 
+           let rs = reverse s in
+           putStrLn $ "Reversed input : " ++ rs
+```
+
+#### Микровывод
+Типичные ошибки:
+```
+let s = getLine  -- !!! Doesn't read from console to `s`
+rs <- reverse s  -- !!! `reverse s` is not a monadic action inside IO
+```
+Лет -- для результатов чистых функций
+```<-``` -- для результатов монаидичных функций
+
+Также do можно писать в любой монаде (прикол: в монаде листа второй пример ошибки -- корректно отработает)
+Также do можно писать вне монад (опуская in по сути), но непонятно зачем
+А ghci это по своей природе бесконечный do-блок внутри монады IO :)
+
+\+ прикол:
+можно так:
+```
+foo :: Int -> Int
+foo = do
+    a <- (+1)
+    return (a * 2)
+    
+ghci> foo 3
+8
+```
+Поскольку стрелка -- это монада
+
+
+### Приколы
+
+### Lazy IO
+```
+main = do
+  fileContent <- readFile "foo.txt"
+  writeFile "bar.txt" ('a':fileContent)
+  readFile  "bar.txt" >>= putStrLn
+  
+ghci> :run main
+afoo
+bar
+--- все ок
+```
+
+```
+main = do
+  fileContent <- readFile "foo.txt"
+  writeFile "foo.txt" ('a':fileContent)
+  readFile  "foo.txt" >>= putStrLn
+
+ghci> :run main
+*** Exception: foo.txt: openFile: resource busy (file is locked)
+
+--- читаем и пишем в один файл -- не ок
+--- потому что язык ленивый, и считывание будет при записи только выполнено
+```
+Может быть пофикшено так:
+```
+main = do
+  fileContent <- readFile "foo.txt"
+  putStrLn fileContent
+  writeFile "foo.txt" ('a':fileContent)
+--- вывели на консоль все содержимое файла -- зафорсили его чтение
+--- но очевидно, это стремно
+```
+Какие решения?
+* можно форсировать вычисления, об этом позже, -- тем самым сжигая оперативку
+* можно использовать библиотеки conduit, pipes, streaming -- там пиздец, но делает работу похожей на работу со стримами
+
+
+### FFI -- интеграция с другими языками
+Ну, экстерн Си:
+```
+/* clang -c simple.c -o simple.o */
+
+int example(int a, int b)
+{
+  return a + b;
+}
+```
+
+```
+-- ghc simple.o simple_ffi.hs -o simple_ffi
+
+{-# LANGUAGE ForeignFunctionInterface #-}
+
+import Foreign.C.Types
+
+foreign import ccall safe "example" 
+    example :: CInt -> CInt -> CInt
+
+main = print (example 42 27)
+```
+
+А что если там будет какой-то принт например? [Есть статейка](https://en.wikibooks.org/wiki/Haskell/FFI), но в рамках курса похер.
+
+### Мутабельные переменные
+Представим, что мы реализовали их так:
+```
+main = do let a0 = readVariable  varA
+          let _  = writeVariable varA 1
+          let a1 = readVariable  varA
+          print (a0, a1)
+```
+Проблемы? Ну все такие же как с гетчаром (буквально). Корректно делать с параметризацией токеном через IORef:
+```
+import Data.IORef (newIORef, readIORef, writeIORef)
+
+foo :: IO ()
+foo = do 
+    varA <- newIORef 0 
+    a0   <- readIORef varA
+    writeIORef varA 1
+    a1   <- readIORef varA
+    print (a0, a1)
+    
+ghci> foo
+(0,1)
+```
+
+### Мутабельные массивы
+Они просто есть, стремные, есть крутой [vector](https://hackage.haskell.org/package/vector):
+```
+import Data.Array.IO (IOArray, newArray, readArray, writeArray)
+
+bar :: IO ()
+bar = do 
+    arr <- newArray (1,10) 37 :: IO (IOArray Int Int)
+    a   <- readArray arr 1
+    writeArray arr 1 64
+    b   <- readArray arr 1
+    print (a, b)
+
+ghci> bar
+(37,64)
+```
+
+Здесь параметризировано двумя типами потому что индексация мб не только интом
+
+Вектор, кстати, саморасширяющийся и мб мутабельным или иммутабельным
+
+### IO Exceptions
+
+Есть функция throwIO -- бросает эксепшн и прерывает исполнение программы. Пример безопастного деления:
+```
+throwIO :: Exception e => e -> IO a
+import           Control.Exception (ArithException (..), catch, throwIO)
+import           Control.Monad     (when)
+
+readAndDivide :: IO Int
+readAndDivide = do
+    x <- readLn
+    y <- readLn
+    when (y == 0) $ throwIO DivideByZero
+    return $ x `div` y
+ghci> readAndDivide 
+7
+3
+2
+ghci> readAndDivide 
+3
+0
+*** Exception: divide by zero
+```
+Здесь функция when -- по сути иф с одной веткой (else у него -- return ()) -- принимает кондишн и монадическое вычисление.
+
+Можно поймать эксепшн:
+```
+catch :: Exception e => IO a -> (e -> IO a) -> IO a
+safeReadAndDivide :: IO Int
+safeReadAndDivide = readAndDivide `catch` \DivideByZero -> return (-1)
+ghci> safeReadAndDivide 
+7
+3
+2
+ghci> safeReadAndDivide 
+3
+0
+-1
+```
+
+Важно, что троу бросает ЛЮБОЙ эксепшн, а кэтч ловит КОНКРЕТНЫЙ. Это можно пофиксить, но нужно еще теории:
+
+Существует экзистенциальный тип SomeException, который хранит в себе что-то, что является эксепшеном. Typeable -- позволяет в рантайме получить информацию о типе (по дефолту она затирается). На этом все и построено:
+```
+data SomeException = forall e . Exception e => SomeException
+
+class (Typeable e, Show e) => Exception e where
+    displayException :: e -> String
+    --- displayException = show
+    
+    fromException :: SomeException -> Maybe e  --- если тип = нашему, то Just
+    toException :: e -> SomeException  --- просто обернет в экзистенциальный тип
+
+
+tryReadAndDivide :: IO (Either String Int)
+tryReadAndDivide = fmap Right $ readAndDivide `catch` \(e :: SomeException) -> 
+    case fromException e of
+        Just (dbze :: DivideByZero) -> return $ Left $ displayException dbze
+        _ -> return $ Left $ "Smth else happened"
+```
+
+
+Как сделать свое исключение?
+```
+{-# LANGUAGE DeriveAnyClass     #-}
+{-# LANGUAGE DeriveDataTypeable #-}
+
+import           Control.Exception (Exception)
+import           Data.Typeable     (Typeable)
+
+data MyException = DummyException
+    deriving (Show, Typeable, Exception)
+ghci> throwIO DummyException 
+*** Exception: DummyException
+
+ghci> :{
+ghci| throwIO DummyException `catch` \DummyException ->
+ghci|     putStrLn "Dummy exception is thrown"
+ghci| :}
+Dummy exception is thrown
+```
+
+Так же есть привычные плюсовые конструкции, связанные с исключениями, но ЗДЕСЬ ЭТО ФУНКЦИИ А НЕ КОНСТРУКЦИИ!!!
+
+```
+try     :: Exception e => IO a -> IO (Either e a)
+tryJust :: Exception e => (e -> Maybe b) -> IO a -> IO (Either b a)
+
+finally :: IO a	 -- computation to run first
+        -> IO b	 -- computation to run afterward (even if an exception was raised)
+        -> IO a
+
+-- | Like 'finally', but only performs the final action 
+-- if there was an exception raised by the computation.
+onException :: IO a -> IO b -> IO a
+```
+
+Штука типа юник-поинтера, позволяет указать как открывать и откпускать ресурс (попытка в raii):
+```
+bracket :: IO a         -- ^ computation to run first (\"acquire resource\")
+        -> (a -> IO b)  -- ^ computation to run last (\"release resource\")
+        -> (a -> IO c)  -- ^ computation to run in-between
+        -> IO c         -- returns the value from the in-between computation
+```
+
+### Напоминание про гарды и (<-)
+
+В гардах можно паттерн-матчиться по результатам функций через `<-`:
+```
+lookup :: FiniteMap -> Int -> Maybe Int
+
+addLookup :: FiniteMap -> Int -> Int -> Maybe Int
+addLookup env var1 var2
+ | Just val1 <- lookup env var1
+ , Just val2 <- lookup env var2
+ = val1 + val2
+{-...other equations...-}
+
+
+strangeOperation :: [Int] -> Ordering
+strangeOperation xs 
+   | 7  <- sum xs
+   , n  <- length xs
+   , n  >= 5
+   , n  <= 20 
+   = EQ
+   | 1  <- sum xs
+   , 18 <- length xs
+   , r  <- nub xs `compare` [1,2,3]
+   , r /= EQ
+   = r
+   | otherwise
+   = [3,1,2] `compare` xs
+
+main = print $ strangeOperation ([5,7..21] ++ [20,19..4])
+```
+
+По сути накладываем кучу условий, и если все из них выполнены, то мы дойдем до основного действия ветки гарда. Прикольно.
+
+### UnsafePerformIO
+
+Можно доставать из ИО Монады значение результата. Это, очевидно, создает ряд проблем:
+```
+import System.IO.Unsafe
+
+foo :: ()
+foo = unsafePerformIO $ putStrLn "foo"
+
+bar :: String
+bar = unsafePerformIO $ do
+          putStrLn "bar"
+          return "baz"
+
+main = do let f = foo
+          putStrLn bar
+
+--- здесь будет выведено:
+--- bar
+--- baz
+--- поскольку компилятор считает, что foo -- чистая и мы никак не используем ее результат
+
+helper i = print i >> return i
+
+main = do
+    one <- helper 1
+    two <- helper 2
+    print $ one + two
+
+--- здесь может быть выведено:
+--- 1
+--- 2
+--- 3
+--- либо:
+--- 2
+--- 1
+--- 3
+```
+Наводит на мысли, что мы теряем порядок вычислений, если делаем такие приколы, опять таки в виду ленивости языка
+
+А если второй пример переписать наполовину небезопасно?
+```
+import System.IO.Unsafe
+
+helper i = print i >> return i
+
+main = do
+    one <- helper 1
+    let two = unsafePerformIO $ helper 2
+    print $ one + two
+```
+Все равно плохо, компилятор может переупорядочить монадоичное вычисление и вычисление чистой функции внутри :(
+
+Вспомним, что внутри ИО монады есть стейт токены. Так вот performUnsafe как бы игнорирует их и подсовывает фейковый токен в вычисление :))
+```
+type S# = State# RealWorld  -- let's use this short alias
+
+print 1 :: S# -> (S#, ())
+
+print 1 >> print 2 = 
+    \s0 -> case print 1 s0 of
+               (s1, _ignored) -> print 2 s1
+
+--- то есть:
+unsafePerformIO (IO f) =
+    case f fakeStateToken of
+        (_ignoredStateToken, result) -> result
+```
+Пример рассахаривания (про переупорядочивание полубезопасных вычислений):
+```
+import System.IO.Unsafe
+
+helper i = print i >> return i
+
+main = do
+    one <- helper 1
+    let two = unsafePerformIO $ helper 2
+    print $ one + two
+    
+main s0 =
+    case helper 1 s0 of
+        (s1, one) ->
+            case helper 2 fakeStateToken of
+                (_ignored, two) ->
+                    print (one + two) s1
+
+main s0 =
+    case helper 2 fakeStateToken of
+        (_ignored, two) ->
+            case helper 1 s0 of
+                (s1, one) ->
+                    print (one + two) s1
+```
+
+Что тогда делать?
+* Везде где можно избежать ансейв вычислений -- лучше их избежать
+* Если мы не в ИО монаде, или можем гарантировать порядок логикой программы (что бывает очев сложно), то использовать unsafePerformIO
+
+##### А когда правда нужно использовать?
+
+\1. Для дебага чистых функций:
+```
+import Debug.Trace
+
+trace     :: String -> a -> a  --- помимо вычисления принтит строку
+traceShow :: Show a => a -> b -> b
+traceM    :: Applicative f => String -> f () 
+
+trace :: String -> a -> a
+trace string expr = unsafePerformIO $ do  --- экстактит результат из монадоическиго вычисления
+    traceIO string  -- slightly clever version of `putStrLn`
+    return expr
+
+
+fib :: Int -> Int
+fib 0 = 0
+fib 1 = 1
+fib n = trace ("n: " ++ show n) $ fib (n - 1) + fib (n - 2)
+
+ghci> putStrLn $ "fib 4:\n" ++ show (fib 4)
+fib 4:
+n: 4
+n: 3
+n: 2
+n: 2
+3
+```
+
+\2. В строках.
+Сейчас будет немного страшно, но главное помнить, что кроме Text и ByteString ничего толком то и не нужно.
+
+Cами строки долгие, т.к. они = лист чаров, можно перегрузить их тип как что-то, что IsString:
+
+```
+type String = [Char]
+{-# LANGUAGE OverloadedStrings #-}
+
+class IsString a where
+    fromString :: String -> a
+ghci> :t "foo"
+"foo" :: [Char]
+
+ghci> :set -XOverloadedStrings
+
+ghci> :t "foo"
+"foo" :: IsString a => a
+```
+
+Собственно Текст и БайтСтринг:
+```
+{-# LANGUAGE OverloadedStrings #-}
+
+import qualified Data.Text as T
+
+-- From pack
+myTStr1 :: T.Text
+myTStr1 = T.pack ("foo" :: String)
+
+-- From overloaded string literal.
+myTStr2 :: T.Text
+myTStr2 = "bar"
+```
+
+```
+{-# LANGUAGE OverloadedStrings #-}
+
+import qualified Data.ByteString       as S
+import qualified Data.ByteString.Char8 as S8
+
+-- From pack
+bstr1 :: S.ByteString
+bstr1 = S.pack ("foo" :: String)
+
+-- From overloaded string literal.
+bstr2 :: S8.ByteString
+bstr2 = "bar"
+```
+
+Причем тут unsafePerformIO ?
+-- Хочется строки не только в ИО монаде использовать, поэтому там под капотом есть эта функция, вот (похуй как оно устронно в точности):
+```
+data ByteString = PS (ForeignPtr Word8) Int Int
+
+unsafeCreate :: Int -> (Ptr Word8 -> IO ()) -> ByteString
+unsafeCreate l f = unsafePerformIO (create l f)
+
+create :: Int -> (Ptr Word8 -> IO ()) -> IO ByteString
+create l f = do
+    fp <- mallocByteString l
+    withForeignPtr fp $ \p -> f p
+    return $ PS fp 0 l
+    
+-- | /O(1)/ 'splitAt' @n xs@ is equivalent to @('take' n xs, 'drop' n xs)@.
+splitAt :: Int -> ByteString -> (ByteString, ByteString)
+
+-- | /O(1)/ Extract the last element of a ByteString.
+last :: ByteString -> Word8
+last ps@(PS x s l)
+    | null ps   = errorEmptyList "last"
+    | otherwise = unsafePerformIO $
+                    withForeignPtr x $ \p -> peekByteOff p (s+l-1)
+```
+
+What to use?
+I. Binary:
+    * Packed:
+        - Lazy: Data.ByteString.Lazy
+        - Strict: Data.ByteString
+II. Text:
+    1. ASCII or 8-bit:
+        * Packed and lazy: Data.ByteString.Lazy.Char8
+        * Packed and strict: 
+            - Data.ByteString.Char8,               
+            - Data.CompactString.ASCII
+            - Data.CompactString with Latin1
+    2. Unicode:
+        2.1 UTF-32: 
+            * Unpacked and lazy:
+                - [Char]
+        2.2 UTF-16:
+            * Packed and lazy: 
+                - Data.Text.Lazy
+            * Packed and strict: 
+                - Data.Text
+                - Data.CompactString.UTF16
+        2.3 UTF-8:
+            * Unpacked and lazy: 
+                - Codec.Binary.UTF8.Generic contains generic operations that can be used to process [Word8]
+            * Packed and lazy: 
+                - Data.ByteString.Lazy.UTF8
+            * Packed and strict: 
+                - Data.CompactString.UTF8 
+                - Data.ByteString.UTF8
+                
+После этого дерева хочется сделать напоминание:
+> Сейчас будет немного страшно, но главное помнить, что кроме Text и ByteString ничего толком то и не нужно.
+
