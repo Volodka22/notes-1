@@ -2458,3 +2458,397 @@ II. Text:
 После этого дерева хочется сделать напоминание:
 > Сейчас будет немного страшно, но главное помнить, что кроме Text и ByteString ничего толком то и не нужно.
 
+
+
+
+# Lecture 11: КоМбИнАтОрНыЕ пАрСеРы и тестирование
+
+Идея понятна, сразу к сути:
+
+### Что является результатом парсинга?
+```
+parseInteger :: String -> Bool
+--- нет, тк хочется интеджер
+
+parseInteger :: String -> Integer
+--- нет, тк не каждая строка = интеджер
+
+parseInteger :: String -> Maybe Integer -- Either for more descriptive error
+--- нет, а что если помимо числа в строке есть что-то еще
+
+parseInteger :: String -> Maybe (Integer, String)
+--- в целом, да
+```
+
+Теперь сделаем это красиво:
+```
+                                      ┌── input stream
+                                      │
+               ┌─ result type         │                 ┌─ remain stream
+               │                      │                 │
+newtype Parser a = Parser { runP :: String -> Maybe (a, String) }
+                             │                       │
+                             └─ unwrapper            └─ parsing result
+```
+
+Немного примеров:
+```
+--- parser combinator type
+newtype Parser a = Parser { runP :: String -> Maybe (a, String) }
+
+--- parsing function
+parseInteger :: Parser Integer  -- String -> Maybe (Integer, String)
+
+--- apply parsing function
+runP :: Parser a -> String -> Maybe (a, String)
+
+
+--- examples:
+ghci> runP parseInteger "5"
+Just (5, "") :: Maybe (Integer, String)
+
+ghci> runP parseInteger "42x7"
+Just (42, "x7") :: Maybe (Integer, String)
+
+ghci> runP parseInteger "abc"
+Nothing :: Maybe (Integer, String)
+```
+
+### Примитивные парсеры
+```
+newtype Parser a = Parser { runP :: String -> Maybe (a, String) }
+
+-- always succeeds without consuming any input
+ok :: Parser ()
+ok = Parser $ \s -> Just ((), s)
+
+-- fails w/o consuming any input if given parser succeeds,
+-- and succeeds if given parser fails
+isnot :: Parser a -> Parser ()
+isnot parser = Parser $ \s -> case runP parser s of
+    Just _  -> Nothing
+    Nothing -> Just ((), s)
+    
+-- succeeds only at the end of input stream
+eof :: Parser ()
+eof = Parser $ \s -> case s of
+    [] -> Just ((), "")
+    _  -> Nothing
+    
+-- consumes only single character and returns it if predicate is true
+satisfy :: (Char -> Bool) -> Parser Char
+satisfy p = Parser $ \s -> case s of
+    []     -> Nothing
+    (x:xs) -> if p x then Just (x, xs) else Nothing
+```
+
+Теперь можно уже их комбинировать:
+```
+-- always fails without consuming any input
+notok :: Parser ()
+notok = isnot ok
+
+-- consumes given character and returns it
+char :: Char -> Parser Char
+char c = satisfy (== c)
+
+-- consumes any character or any digit only
+anyChar, digit :: Parser Char
+anyChar = satisfy (const True)
+digit   = satisfy isDigit
+
+--- examples
+ghci> runP eof ""
+Just ((),"")
+ghci> runP eof "aba"
+Nothing
+ghci> runP (char 'a') "aba"
+Just ('a',"ba")
+ghci> runP (char 'x') "aba"
+Nothing
+```
+
+
+### Полезные штуки -- инстансы
+```
+instance Functor     Parser  -- replace parser value
+instance Applicative Parser  -- run parsers sequentially one after another
+instance Monad       Parser  -- same as above but with monadic capabilities
+instance Alternative Parser  -- allows to choose parser
+```
+
+Functor -- применяет функцию к значению в контексте и при этом не меняет сам контекст:
+```
+instance Functor Parser where
+    fmap :: (a -> b) -> Parser a -> Parser b
+    fmap f (Parser parser) = Parser (fmap (first f) . parser)
+```
+
+Аппликативный функтор -- оператор апп должен распарсить (1) функцию, после распарсить (2) значение и применить функцию к значению:
+```
+instance Applicative Parser where
+    pure :: a -> Parser a
+    pure a = Parser $ \s -> Just (a, s)
+
+    (<*>) :: Parser (a -> b) -> Parser a -> Parser b
+    Parser pf <*> Parser pa = Parser $ \s -> case pf s of
+        Nothing     -> Nothing
+        Just (f, t) -> case pa t of
+            Nothing     -> Nothing
+            Just (a, r) -> Just (f a, r)
+
+    -- can be written shorter using Maybe as Monad
+```
+
+:)
+```
+instance Monad Parser -- exercise
+```
+
+Альтернатива -- выбор из двух парсеров:
+```
+instance Alternative Parser where
+    empty :: Parser a  -- always fails
+    (<|>) :: Parser a -> Parser a -> Parser a  -- run first, if fails — run second
+```
+
+### Что уже имеем?
+```
+-- type
+newtype Parser a = Parser { runP :: String -> Maybe (a, String) }
+
+-- parsers
+eof, ok :: Parser ()
+satisfy :: (Char -> Bool) -> Parser Char
+empty   :: Parser a
+
+-- combinators
+pure  :: a -> Parser a
+(<|>) :: Parser a -> Parser a -> Parser a         -- orElse
+(>>=) :: Parser a -> (a -> Parser b) -> Parser b  -- andThen
+```
+
+### Что будет полезно еще?
+Все можно вывести из уже имеющихся функций
+```
+-- type
+newtype Parser a = Parser { runP :: String -> Maybe (a, String) }
+
+-- primitive parsers
+eof, ok :: Parser ()
+satisfy :: (Char -> Bool) -> Parser Char
+
+-- combinators
+-- * Functor
+fmap  :: (a -> b) -> Parser a -> Parser b
+(<$)  :: a -> Parser b -> Parser a
+
+-- * Applicative
+pure  :: a -> Parser a
+(<*>) :: Parser (a -> b) -> Parser a -> Parser b
+(<*)  :: Parser a -> Parser b -> Parser a -- run both in sequence, result of first
+(*>)  :: Parser a -> Parser b -> Parser b -- similar to above
+
+-- * Alternative
+empty :: Parser a
+(<|>) :: Parser a -> Parser a -> Parser a -- orElse
+many  :: Parser a -> Parser [a] -- zero or more
+some  :: Parser a -> Parser [a] -- one or more (should be NonEmpty) 
+
+-- * Monadic
+(>>=) :: Parser a -> (a -> Parser b) -> Parser b  -- andThen
+```
+
+UPD: еще полезно иметь:
+```
+string :: String -> Parser String  -- like 'char' but for string
+oneOf  :: [String] -> Parser String  -- parse first matched string from list
+```
+
+Примеры:
+```
+ghci> runP (ord <$> char 'A') "A"
+Just (65,"")
+
+
+-- аппликатив стайл читать так:  f <$> c1 <*> c2
+-- возьми функцию f, примени к значению в контексте c1 -- получи функцию в контексте,
+-- и примени ее к значению в контексте c2
+ghci> runP ((\x y -> [x, y]) <$> char 'a' <*> char 'b') "abc"
+Just ("ab","c")
+ghci> runP ((\x y -> [x, y]) <$> char 'a' <*> char 'b') "xxx"
+Nothing
+
+
+ghci> runP (char 'a' <* eof) "a"
+Just ('a',"")
+ghci> runP (char 'a' <* eof) "ab"
+Nothing
+
+
+ghci> runP (many $ char 'a') "aaabcd"
+Just ("aaa","bcd")
+ghci> runP (many $ char 'a') "xxx"
+Just ("","xxx")
+ghci> runP (some $ char 'a') "xxx"
+Nothing
+
+
+ghci> runP (char 'a' <|> char 'b') "abc"
+Just ('a',"bc")
+ghci> runP (char 'a' <|> char 'b') "bca"
+Just ('b',"ca")
+ghci> runP (char 'a' <|> char 'b') "cab"
+Nothing
+```
+
+
+### Более умный пример
+Распарсить ответ пользователя: [y/n]
+```
+data Answer = Yes | No
+
+yesP :: Parser Answer
+yesP = Yes <$ oneOf ["y", "Y", "yes", "Yes", "ys"]
+-- тут проблема, тк oneOf идет до первого удачного парсинга => 
+-- надо писать сначала длинные строки, а потом короткие :)
+
+noP :: Parser Answer
+noP = No <$ oneOf ["n", "N", "no", "No"]
+
+answerP :: Parser Answer
+answerP = yesP <|> noP
+```
+
+### Библиотеки
+Это все круто и понятно, что мы будем писать все это руками, но есть уже готовые либы:
+* parsec -- old as fuck
+* attopaarsec -- fast, but poor error msgs, backtracks by default
+  Бэктрекинг -- это про альтернативу -- если левый парсер падает, то есть два варианта:
+    - запустить правый парсер на изначальной строке -- backtracking
+    - запустить правый парсер на пожованном остатке строке -- no backtracking
+* megaparsec -- hype
+
+
+## Тестирование
+
+### Библиотеки
+* hspec — declarative unit testing
+* hedgehog — property-based testing
+* tasty — testing framework for combining different approaches
+  - tasty-hspec — tasty provider for hspec
+  - tasty-hedgehog — tasty provider for hedgehog
+
+Тэйсти позволяет связывать тестовые типы из различных библиотек в свой тип TestTree. После берет нужный провайдер, специфицирует тип, запускает тесты
+
+### Unit тесты
+
+```
+module Test.Unit
+       ( hspecTestTree
+       ) where
+
+import Data.Maybe (isJust, isNothing)
+
+import Test.Tasty (TestTree)
+import Test.Tasty.Hspec (Spec, describe, it, shouldBe, shouldSatisfy, testSpec)
+
+import Parser (char, eof, runP)
+
+hspecTestTree :: IO TestTree
+hspecTestTree = testSpec "Simple parser" spec_Parser
+
+-- принято писать строго так:
+spec_Parser :: Spec
+spec_Parser = do
+  describe "eof works" $ do
+    it "eof on empty input" $
+      runP eof "" `shouldSatisfy` isJust
+    it "eof on non-empty input" $
+      runP eof "x" `shouldSatisfy` isNothing
+  describe "char works" $ do
+    it "char parses character" $
+      runP (char 'a') "abc" `shouldBe` Just ('x', "bc") -- it fails
+```
+Запускать так:
+```
+module Main where
+
+import Test.Tasty (defaultMain, testGroup)
+
+import Test.Unit (hspecTestTree)
+
+main :: IO ()
+main = hspecTestTree >>= \unitTests ->
+       let allTests = testGroup "Parser" [unitTests]
+       in defaultMain allTests
+```
+
+### Property-based тесты
+
+Юнит тесты норм, но по сути мы хардкодим все результаты -- как следствие, можем спокойно что-то упустить. Вариант круче -- тестировать свойства функций. Библиотека hedgehog позволяет под описанное свойство как-то нагенерить выборок и проверять их. Понятно, что это намного мощнее, чем юнит тесты, но и намного сложнее, очеидно, тоже
+
+Пример свойства:
+```
+forall xs : reverse(reverse xs) == xs
+```
+Пишем генератор и проперти:
+```
+import Hedgehog
+
+import qualified Data.List as List
+import qualified Hedgehog.Gen as Gen
+import qualified Hedgehog.Range as Range
+
+genIntList :: Gen [Int]
+genIntList =
+  let listLength = Range.linear 0 100000
+  in  Gen.list listLength Gen.enumBounded
+
+prop_reverse :: Property
+prop_reverse = property $
+  forAll genIntList >>= \xs ->
+  List.reverse (List.reverse xs) === xs
+```
+
+### Shrinking
+Прикольная штука, которая позволяет при падении проперти теста найти наименьший аналог для него, чтобы тест выглядел человеко-читаемым для ручного дебага далее
+
+### Юз-кейсы для проперти-бэйсд тестированиы:
+1. Round-trip properties:
+    * read        . show      ≡ id
+    * decode      . encode    ≡ id
+    * deserialize . serialize ≡ id
+2. Type classes laws:
+    * (a <> b) <> c ≡ a <> (b <> c)
+    * a <> mempty ≡ a
+    * mempty <> a ≡ a
+
+Но вот такое ```(m >>= f) >>= g ≡ m >>= (\x -> f x >>= g)``` кажется уже сложным закодить
+
+Пример:
+```
+module Test.Property (okTestTree) where
+
+import Hedgehog (Gen, Property, forAll, property, (===))
+import Test.Tasty (TestTree)
+import Test.Tasty.Hedgehog (testProperty)
+
+import Parser (ok, runP)
+
+import qualified Hedgehog.Gen as Gen
+import qualified Hedgehog.Range as Range
+
+okTestTree :: TestTree
+okTestTree = testProperty "ok always succeeds" prop_Ok
+
+genString :: Gen String
+genString =
+  let listLength = Range.linear 0 100
+  in  Gen.list listLength Gen.alpha
+
+prop_Ok :: Property
+prop_Ok = property $
+  forAll genString >>= \s ->
+  runP ok s === Just ((), s)
+```
