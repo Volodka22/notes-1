@@ -2852,3 +2852,544 @@ prop_Ok = property $
   forAll genString >>= \s ->
   runP ok s === Just ((), s)
 ```
+
+      
+      
+      
+      
+      
+      
+
+
+# Lecture 12. Monad Transformers
+
+Напоминание про суть монад:
+> Монады -- это способ справляться с эффектами. Некоторая коробочка, когда мы находимся в ней -- имеет доступ к некоторым фичам
+
+Список фичей:
+* Maybe -- вычисление может упасть
+* Either -- вычисление может упасть с сообщением об ошибке
+* List -- вычисление может иметь несколько значений 
+* Writer -- у вычисления есть моноидальный аккумулятор
+* Reader -- вычисление имеет доступ иммутабельному контексту
+* State -- вычисление имеет доступ к мутабельному контексту
+* IO -- вычисление имеет доступ к ИО действиям
+
+Пример для ридера -- позволяет явно обернуть контекст внутрь себя:
+```
+foo :: String -> Env -> Int
+-- simple for begginers
+
+foo :: String -> Reader Env Int
+-- effect is handled automatically
+```
+
+Мы же хотим иметь доступ к нескольким фичам сразу, значит хотим уметь комбинировать
+
+Пример: хоти скомбинировать Ридер и Стейт (например, для реализации шахмат по сети)
+```
+foo :: UnknownType
+foo i = do
+    baseCounter <- ask
+    let newCounter = baseCounter + i
+    put [baseCounter, newCounter]
+    return newCounter
+```
+Проблема: внури ридера имеем только ask, внутри стейта -- только put
+Решение?
+\1. RWS -- ридер-врайтер-стейт, круто, но зачем нам врайтер?
+```
+foo :: RWS Int [Int] () Int
+foo i = do
+    baseCounter <- ask
+    let newCounter = baseCounter + i
+    put [baseCounter, newCounter]
+    return newCounter
+```
+
+\2. State с завернутым в него Ридером -- не очень тайп-сэйф:
+```
+foo :: State (Int, [Int]) Int
+foo i = do
+    x <- gets fst
+    let xi = x + i
+    put (x, [x, xi])
+    return xi
+```
+
+\+ как бы а что с другими монадами делать? не создавать же C_n^k комбинаций...
+
+
+### Собственно, трансформеры
+Для примера хватит ReaderT и StateT -- по-сути близко ко второму варианту с внутренней монадой, но уже с норм типизацией
+
+```
+foo :: Int -> ReaderT Int (State [Int]) Int  -- or StateT [Int] (Reader Int) Int
+foo i = do
+    baseCounter <- ask
+    let newCounter = baseCounter + i
+    put [baseCounter, newCounter]
+    return newCounter
+```
+
+Прикол понятен: для Функтора, Аппликатива, Фолдабла, Альтернативы и Трайверсабла -- композиции соответствующих штук -- та же штука, а для монад - нет :( надо писать ручками
+
+### MaybeT
+Пример: хотим коннектиться к пачке хостов (ИО) и сообщать получилось ли (Мейби)
+Можно так:
+```
+tryConnect :: HostName -> IO (Maybe Connection)
+
+foo :: IO (Maybe smth)
+foo = do
+  mc1 <- tryConnect "host1"
+  case mc1 of
+    Nothing -> return Nothing
+    Just c1 -> do
+      mc2 <- tryConnect "host2"
+      case mc2 of
+        Nothing -> return Nothing
+        Just c2 -> do
+          ...
+```
+
+Нужно так:
+```
+newtype MaybeIO a = MaybeIO { runMaybeIO :: IO (Maybe a) }
+
+instance Monad MaybeIO where
+    return x = MaybeIO (return (Just x))
+    MaybeIO action >>= f = MaybeIO $ do
+        result <- action
+        case result of
+            Nothing -> return Nothing
+            Just x  -> runMaybeIO (f x)
+            
+-- nice:
+result <- runMaybeIO $ do
+    c1 <- MaybeIO $ tryConnect "host1"
+    c2 <- MaybeIO $ tryConnect "host2"
+    ...
+```
+
+Но вот жто не будет работать:
+```
+result <- runMaybeIO $ do
+    c1 <- MaybeIO $ tryConnect "host1"
+    print "Hello"
+    c2 <- MaybeIO $ tryConnect "host2"
+```
+Поскольку внутри МейбиИО мы не умеем делать чисто ИО действие -- принт. Выход -- написать трансформер ИО в МейбиИО:
+```
+transformIO2MaybeIO :: IO a -> MaybeIO a
+transformIO2MaybeIO action = MaybeIO $ do
+    result <- action
+    return (Just result)
+
+result <- runMaybeIO $ do
+  c1 <- MaybeIO $ tryConnect "host1"
+  transformIO2MaybeIO $ print "Hello"
+  c2 <- MaybeIO $ tryConnect "host2"
+  ...
+```
+
+Чтобы так не ебаться с каждой монадой в качестве второго элемента пары -- есть MaybeT:
+```
+newtype MaybeT m a = MaybeT 
+    { runMaybeT :: m (Maybe a) }
+    
+instance Monad m => Monad (MaybeT m) where
+    return :: a -> MaybeT m a
+    return x = MaybeT (return (Just x))
+
+    (>>=) :: MaybeT m a -> (a -> MaybeT m b) -> MaybeT m b
+    MaybeT action >>= f = MaybeT $ do
+        result <- action
+        case result of
+            Nothing -> return Nothing
+            Just x  -> runMaybeT (f x)
+```
+
+Тогда наш трансформ выглядит так:
+```
+newtype MaybeIO a = MaybeIO
+    { runMaybeIO :: IO (Maybe a) }
+
+transformToMaybeT :: Functor m => m a -> MaybeT m a
+transformToMaybeT = MaybeT . fmap Just
+```
+
+Ну и чтобы не ебаться с трансформом, есть MonadTrans, которая поднимает действие в монаду:
+```
+class MonadTrans t where    -- t :: (* -> *) -> * -> *
+    lift :: Monad m => m a -> t m a
+    
+    {-# LAWS
+
+        1. lift . return  ≡ return
+        2. lift (m >>= f) ≡ lift m >>= (lift . f)
+
+    #-}
+
+instance MonadTrans MaybeT where
+    lift :: Monad m => m a -> MaybeT m a
+    lift = transformToMaybeT
+```
+
+Пример из жизни: верификация мэйла, пока не будет введен валидный:
+```
+emailIsValid :: String -> Bool
+emailIsValid email = '@' `elem` email
+
+askEmail :: IO (Maybe String)
+askEmail = do
+    putStrLn "Input your email, please:"
+    email <- getLine
+    return $ if emailIsValid email
+             then Just email 
+             else Nothing 
+
+main :: IO ()
+main = do
+    email <- askEmail
+    case email of
+        Nothing     -> putStrLn "Wrong email."
+        Just email' -> putStrLn $ "OK, your email is " ++ email'
+```
+Переписывается в это:
+```
+emailIsValid :: String -> Bool
+emailIsValid email = '@' `elem` email
+
+askEmail :: MaybeT IO String
+askEmail = do
+    lift $ putStrLn "Input your email, please:"
+    email <- lift getLine
+    guard $ emailIsValid email
+    return email
+    
+main :: IO ()
+main = do
+    Just email <- runMaybeT $ untilSuccess askEmail
+    putStrLn $ "OK, your email is " ++ email
+
+untilSuccess :: Alternative f => f a -> f a
+untilSuccess = foldr (<|>) empty . repeat
+
+-- Defined in Control.Monad.Trans.Maybe
+instance (Functor m, Monad m) => Alternative (MaybeT m) where
+    empty = MaybeT (return Nothing)
+    x <|> y = MaybeT $ maybe (runMaybeT y) pure $ runMaybeT x
+```
+
+### ReaderT
+
+Очень популярный паттерн Environment + IO:
+```
+newtype LoggerName = LoggerName { getLoggerName :: Text }
+
+logMessage :: LoggerName -> Text -> IO ()
+
+readFileWithLog :: LoggerName -> FilePath -> IO Text
+readFileWithLog loggerName path = do
+    logMessage loggerName $ "Reading file: " <> T.pack (show path)
+    readFile path
+    
+writeFileWithLog :: LoggerName -> FilePath -> Text -> IO ()
+writeFileWithLog loggerName path content = do
+    logMessage loggerName $ "Writing to file: " <> T.pack (show path)
+    writeFile path content
+    
+prettifyFileContent :: LoggerName -> FilePath -> IO ()
+prettifyFileContent loggerName path = do
+    content <- readFileWithLog loggerName path
+    writeFileWithLog loggerName path (format content)
+
+main :: IO ()
+main = prettifyFileContent (LoggerName "Application") "foo.txt"
+```
+
+С трансформером Ридера:
+```
+newtype ReaderT r m a = ReaderT { runReaderT :: r -> m a }
+
+type LoggerIO a = ReaderT LoggerName IO a
+
+logMessage :: Text -> LoggerIO ()
+
+readFileWithLog :: FilePath -> LoggerIO Text
+readFileWithLog path = do
+    logMessage $ "Reading file: " <> T.pack (show path)
+    lift $ readFile path
+    
+writeFileWithLog :: FilePath -> Text -> LoggerIO ()
+writeFileWithLog path content = do
+    logMessage $ "Writing to file: " <> T.pack (show path)
+    lift $ writeFile path content
+    
+prettifyFileContent :: FilePath -> LoggerIO ()
+prettifyFileContent path = do
+    content <- readFileWithLog path
+    writeFileWithLog path (format content)
+    
+main :: IO ()
+main = runReaderT (prettifyFileContent "foo.txt") (LoggerName "Application") 
+```
+
+Монада над РидерТ:
+```
+newtype ReaderT r m a = ReaderT { runReaderT :: r -> m a }
+
+type Reader r a = ReaderT r          Identity a
+type LoggerIO a = ReaderT LoggerName IO       a
+
+instance Monad m => Monad (ReaderT r m) where
+    return  = lift . return
+    m >>= f = ReaderT $ \r -> do
+        a <- runReaderT m r
+        runReaderT (f a) r
+        
+instance MonadTrans (ReaderT r) where
+    lift :: m a -> ReaderT r m a
+    lift = ReaderT . const
+ -- lift ma = ReaderT $ \_ -> ma
+```
+
+### Табличка трансформеров
+
+|Монада| Трансформер | Оригинальный тип | Комбинированный тип |
+|-|- | - | - |
+|Maybe | MaybeT | Maybe a | m (Maybe a) |
+|Either| EitherT | Either a b | m (Either a b) |
+|Writer | WriterT | (a, w) | m (a, w) |
+| Reader | ReaderT | r -> a | r -> m a |
+| State | StateT | s -> (a, s) | s -> m (a, s) |
+| Cont | ContT | (a -> r) -> r | (a -> m r) -> m r|
+
+Заметно, что IOT нет. Но его и не реализовать (на рассмотрение читающего). Поэтому, если в стеке монад мы хотим иметь IO, то она должна быть самой глубой. Есть специальный класс MonadIO с функцией listIO -- позволяющей завернуть вычисление в ИО контекст:
+
+```
+class Monad m => MonadIO m where
+    liftIO :: IO a -> m a
+    
+instance MonadIO IO where
+    liftIO = id
+    
+instance MonadIO m => MonadIO (StateT s m) where
+    liftIO = lift . liftIO
+    
+instance MonadIO m => MonadIO (ReaderT r m) where
+    liftIO = lift . liftIO
+```
+
+### mtl package
+
+Есть проблема в таком стеке есть проблема -- множество лифтов, этот пакет позволяет избегать таких приколов:
+```
+class Monad m => MonadReader r m | m -> r where
+    ask    :: m r
+    local  :: (r -> r) -> m a -> m a
+    reader :: (r -> a) -> m a
+    
+-- good old simple implementation of all functions for Reader
+instance Monad m => MonadReader r (ReaderT r m) where ...
+
+instance MonadReader r m => MonadReader r (StateT s m) where
+    ask    = lift ask
+    local  = mapStateT . local
+    reader = lift . reader
+```
+Здесь ```|``` -- функциональная зависимость -- она говорит о том, что тип возвращаемого значения (r) напрямую зависит от переданной монады (m). Это нужно, чтобы продиктовать зависимость инвайронмента от типа монады (избегая ситуации, что для одной монады есть два инстанса для разных инвайронментов -- что тогда возвращать при ask?)
+
+Как легко сконвертить в mtl:
+```
+-- Complex type for which we need to write all instances manually :(
+
+newtype M a = M (Environment -> MyState -> IO (a, MyState))
+
+{-# LANGUAGE FlexibleContexts           #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE MultiParamTypeClasses      #-}
+
+-- Move all dirty work to compiler
+
+newtype M a = M (ReaderT Environment (StateT MyState IO) a)
+  deriving (Functor, Applicative, Monad, MonadIO, 
+            MonadState MyState, MonadReader Environment)
+```
+
+Тут важно, что есть стремный стиль:
+```
+foo :: Text -> M Text
+```
+Есть классный стиль:
+```
+foo :: ( MonadState  MyState     m
+       , MonadReader Environment m
+       , MonadIO                 m
+       ) => Text -> m Text
+```
+Но тоже есть прикол, что инстансы могут быть определены кка угодно, и по сути тут происходит перекладывание ответственности за их реализацию на юзера.
+
+### Констрейнты в Хаскелле
+По сути имеем на псевдокоде что-то такое:
+```
+foo ::
+  Context = m
+  Effects m =
+       Needs   Env
+     , Updates Stack
+     , Throws  EmptyStackError
+     , Reads   "config/application.toml"
+  Type = Int -> Int -> m [Int]
+```
+Пишется оно по-хорошему(?) так:
+```
+foo :: ( MonadReader Env m
+       , MonadState  Stack m
+       , MonadError  EmptyStackError m
+       , MonadIO m
+       )
+    => Int -> Int -> m [Int]
+```
+
+
+## Напоминалка про комбинаторные парсеры
+```
+newtype Parser a = Parser { runParser :: String -> Maybe (a, String) }
+```
+
+Можно скомбинировать Стейт с Врайтером чтобы уметь логгировать, еще навесить Ридер для подставления значений переменных
+```
+newtype StateT s m a = StateT { runStateT :: s -> m (a, s) }
+
+type Parser a = StateT String Maybe a
+```
+
+## Exceptions with MonadThrow
+
+> \- можно ли кидать ошибку из чистого кода?
+> \- бросать можно везде, ловить можно только в ИО
+
+Какой-то пиздец...
+
+Бросать:
+```
+class Monad m => MonadThrow m where
+    throwM :: Exception e => e -> m a
+
+instance MonadThrow Maybe where
+    throwM _ = Nothing
+
+instance MonadThrow IO where
+    throwM = Control.Exception.throwIO
+
+instance MonadThrow m => MonadThrow (StateT s m) where
+    throwM = lift . throwM
+```
+Ловить:
+```
+class MonadThrow m => MonadCatch m where
+    catch :: Exception e => m a -> (e -> m a) -> m a
+
+instance MonadCatch IO where
+    catch = Control.Exception.catch
+```
+
+Бросать Error:
+```
+class (Monad m) => MonadError e m | m -> e where
+    throwError :: e -> m a
+    catchError :: m a -> (e -> m a) -> m a
+    
+newtype ExceptT e m a = ExceptT { runExceptT :: m (Either e a) }
+
+runExceptT :: ExceptT e m a -> m (Either e a)
+
+instance Monad m => MonadError e (ExceptT e m) where ...
+
+withExceptT :: Functor m => (e -> e') -> ExceptT e m a -> ExceptT e' m a
+
+foo :: MonadError FooError m => ...
+bar :: MonadError BarError m => ...
+baz :: MonadError BazError m => ...
+
+data BazError = BazFoo FooError | BazBar BarError
+
+baz = do
+    withExcept BazFoo foo
+    withExcept BazBar ba
+```
+> Примеров не будет, их же и так просто найти :))))))))))))
+
+## Советы 
+Паттерн РидерТ ИО -- пока не пишешь библиотеку - используй конкретную монаду:
+```
+data Env = Env
+  { envServerAddress :: Text
+  , envConn :: IORef (Maybe Conn)
+  }
+
+establishConn :: ReaderT Env IO ()
+establishConn = do
+  Env sAddr cRef <- ask
+  prev <- liftIO $ readIORef cRef
+  whenNothing prev $
+    throwM ConnectionExists
+  liftIO $
+    connect sAddr >>=
+    writeIORef cRef . Just
+
+data AppError = ConnectionExists
+  deriving Show
+instance Exception AppError
+```
+Tagless final -- Когда хочется протестировать в чистом виде -- прячем функционал под копот типа:
+```
+data Name = Name String
+data User = User { name :: Name
+                 , age :: Int }
+
+class Monad m => MonadDatabase m where
+    getUser    :: Name -> m User
+    deleteUser :: User -> m ()
+
+test :: MonadDatabase m => m ()
+test = do
+  user <- getUser (Name "Pedro")
+  when (age user < 18) (deleteUser user)
+
+newtype AppM a = AppM (ReaderT Ctx IO a)
+newtype TestM a = TestM (State [User] a)
+
+main :: IO ()
+main = runAppM test
+```
+
+## Вредные советы
+Transformers + IO -- здесь ЭксептТ == ЕизерТ -- он не добавляет ничего к ошибке из ИО
+СтейтТ плохо дружит с ошибками из ИО -- лучше использовать IORef:
+```
+foo :: ExceptT IO ()
+
+bar :: StateT IO ()
+
+foobar :: ExceptT (StateT IO) ()
+```
+
+
+Помнить про порядок трансформеров (mvp: StateT ReaderT IO)
+Если спутать порядок Эксепта и Стейста то можно в одном случае получить ошибку и стейт на момент ошибки, во втором -- ошибку и проебать стейт, грустно.
+```
+-- Good way
+foo :: ReaderT Ctx
+        (ExceptT Err (State MyState)) ()
+
+-- Little bit less efficient
+bar :: ExceptT Err
+        (StateT MyState (Reader Ctx)) ()
+
+-- Fragile code, don't write so!
+foobar :: ExceptT Err (Except Err) ()
+```
+
